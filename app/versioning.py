@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.config import Settings
-from app.runner import ProcessError, ProcessRunner
+from app.runner import ProcessError, ProcessNotFoundError, ProcessRunner
 
 
 class UnsupportedCliVersionError(RuntimeError):
@@ -31,10 +31,12 @@ def parse_version(output: str) -> str:
     return match.group(1)
 
 
-async def _read_version(command: str, expected: str) -> CliVersion:
+async def _read_version(command: str, expected: str) -> CliVersion | None:
     runner = ProcessRunner(timeout_seconds=10, max_output_bytes=65_536)
     try:
         result = await runner.run([command, "--version"], "", Path("."))
+    except ProcessNotFoundError:
+        return None
     except ProcessError as exc:
         raise UnsupportedCliVersionError(str(exc)) from exc
     output = result.stdout + result.stderr
@@ -46,7 +48,16 @@ async def verify_cli_versions(settings: Settings) -> dict[str, CliVersion]:
         _read_version(settings.codex_command, settings.expected_codex_version),
         _read_version(settings.claude_command, settings.expected_claude_version),
     )
-    result = {"codex": versions[0], "claude": versions[1]}
+    result = {
+        name: version
+        for name, version in zip(("codex", "claude"), versions, strict=True)
+        if version is not None
+    }
+    if not result:
+        raise UnsupportedCliVersionError(
+            "Kessel needs at least one installed provider CLI: Codex or "
+            "Claude Code"
+        )
     mismatches = [
         f"{name} {version.actual} (tested: {version.expected})"
         for name, version in result.items()

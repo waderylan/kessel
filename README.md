@@ -34,6 +34,8 @@ kessel setup
 - Stops that temporary process when testing finishes.
 
 Setup does not install or leave a background service running. It is safe to run again and preserves the existing Kessel key.
+One working provider is enough. If neither provider is installed and logged in,
+setup exits without creating a configuration and explains how to continue.
 
 ### 3. Choose how Kessel should run
 

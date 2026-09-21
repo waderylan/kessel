@@ -482,8 +482,28 @@ def command_setup() -> int:
     _print_doctor(checks)
     working = [check for check in checks if check.working]
 
+    if not working:
+        print(
+            "[error] Kessel needs at least one installed and logged-in provider.",
+            file=sys.stderr,
+        )
+        print(
+            "Install or log in to Codex or Claude Code using the guidance above, "
+            "then run `kessel setup` again.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if len(working) == 1:
+        print(
+            f"[ok] {working[0].display_name} is ready. Kessel will use that "
+            "provider; the other provider is optional."
+        )
+    else:
+        print("[ok] Codex and Claude Code are both ready.")
+
     config, created = load_or_create_config()
-    resolved_commands = {check.name: check.executable for check in checks}
+    resolved_commands = {check.name: check.executable for check in working}
     configured_commands = UserConfig(
         api_key=config.api_key,
         host=config.host,
@@ -496,8 +516,6 @@ def command_setup() -> int:
         config = configured_commands
     print("[ok] Generated a local API key" if created else "[ok] API key already exists")
 
-    if not working:
-        print("[warning] No provider is ready; install or log in to one using the command above.")
     try:
         tests_failed = asyncio.run(_setup_provider_tests(config, working))
     except ServiceError as exc:
@@ -505,12 +523,17 @@ def command_setup() -> int:
         return 1
 
     print("\nConnection details")
-    print(f"OpenAI base URL (Claude): {config.base_url}/v1/claude")
-    print(f"OpenAI base URL (Codex):  {config.base_url}/v1/codex")
-    print(f"Anthropic base URL:       {config.base_url}")
+    working_names = {check.name for check in working}
+    if "claude" in working_names:
+        print(f"OpenAI base URL (Claude): {config.base_url}/v1/claude")
+        print(f"Anthropic base URL:       {config.base_url}")
+    if "codex" in working_names:
+        print(f"OpenAI base URL (Codex):  {config.base_url}/v1/codex")
     print("API key:                  run `kessel key` to reveal it")
     print("\nRun an application with managed settings:")
-    print("kessel run --provider codex -- python your_app.py")
+    print(
+        f"kessel run --provider {working[0].name} -- python your_app.py"
+    )
     print("Setup does not leave Kessel running in the background.")
     return 1 if tests_failed else 0
 

@@ -581,7 +581,7 @@ def create_app(
         )
 
     @application.get("/health")
-    async def health() -> dict[str, object]:
+    async def health() -> JSONResponse:
         commands = tuple(
             (name, application.state.registry.get(name).command)
             for name in application.state.registry.names
@@ -589,7 +589,21 @@ def create_app(
         provider_status = await application.state.provider_availability_cache.get(
             commands
         )
-        return {"status": "ok", "providers": provider_status}
+        if not any(status["available"] for status in provider_status.values()):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "error",
+                    "providers": provider_status,
+                    "message": (
+                        "No supported provider CLI is installed. Install Codex "
+                        "or Claude Code, then run `kessel setup`."
+                    ),
+                },
+            )
+        return JSONResponse(
+            content={"status": "ok", "providers": provider_status}
+        )
 
     def unsupported_parameter(parameter: str, reason: str) -> None:
         raise HTTPException(

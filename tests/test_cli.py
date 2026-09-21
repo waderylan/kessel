@@ -92,7 +92,7 @@ def test_setup_is_idempotent(
     assert "Generated a local API key" in first_output
     assert first_key not in first_output
     assert "run `kessel key` to reveal it" in first_output
-    assert "kessel run --provider codex -- python your_app.py" in first_output
+    assert "kessel run --provider claude -- python your_app.py" in first_output
     assert "does not leave Kessel running" in first_output
 
     assert cli.main(["setup"]) == 0
@@ -100,6 +100,126 @@ def test_setup_is_idempotent(
     assert "API key already exists" in second_output
     assert UserConfig.load().api_key == first_key
     assert len(test_calls) == 2
+
+
+def test_setup_succeeds_with_one_provider_and_configures_only_it(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("KESSEL_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path / "state"))
+    checks = [
+        ProviderHealth("codex", "Codex", False, False),
+        ProviderHealth(
+            "claude",
+            "Claude Code",
+            True,
+            True,
+            "1.0.0",
+            executable="resolved-claude",
+        ),
+    ]
+    monkeypatch.setattr(cli, "check_providers", lambda: checks)
+    tested: list[str] = []
+
+    async def fake_setup_tests(
+        config: UserConfig, working: list[ProviderHealth]
+    ) -> bool:
+        tested.extend(check.name for check in working)
+        return False
+
+    monkeypatch.setattr(cli, "_setup_provider_tests", fake_setup_tests)
+
+    assert cli.main(["setup"]) == 0
+
+    config = UserConfig.load()
+    output = capsys.readouterr().out
+    assert config.claude_command == "resolved-claude"
+    assert config.codex_command is None
+    assert tested == ["claude"]
+    assert "Claude Code is ready" in output
+    assert "the other provider is optional" in output
+    assert "OpenAI base URL (Claude)" in output
+    assert "OpenAI base URL (Codex)" not in output
+    assert "kessel run --provider claude" in output
+
+
+def test_setup_succeeds_with_only_codex(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("KESSEL_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path / "state"))
+    checks = [
+        ProviderHealth(
+            "codex",
+            "Codex",
+            True,
+            True,
+            "1.0.0",
+            executable="resolved-codex",
+        ),
+        ProviderHealth("claude", "Claude Code", False, False),
+    ]
+    monkeypatch.setattr(cli, "check_providers", lambda: checks)
+
+    async def fake_setup_tests(
+        config: UserConfig, working: list[ProviderHealth]
+    ) -> bool:
+        assert [check.name for check in working] == ["codex"]
+        return False
+
+    monkeypatch.setattr(cli, "_setup_provider_tests", fake_setup_tests)
+
+    assert cli.main(["setup"]) == 0
+
+    config = UserConfig.load()
+    output = capsys.readouterr().out
+    assert config.codex_command == "resolved-codex"
+    assert config.claude_command is None
+    assert "Codex is ready" in output
+    assert "OpenAI base URL (Codex)" in output
+    assert "OpenAI base URL (Claude)" not in output
+    assert "Anthropic base URL" not in output
+    assert "kessel run --provider codex" in output
+
+
+def test_setup_fails_without_a_working_provider_and_does_not_create_config(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("KESSEL_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path / "state"))
+    checks = [
+        ProviderHealth("codex", "Codex", False, False),
+        ProviderHealth("claude", "Claude Code", True, False),
+    ]
+    monkeypatch.setattr(cli, "check_providers", lambda: checks)
+    monkeypatch.setattr(
+        cli,
+        "_setup_provider_tests",
+        lambda *args: pytest.fail("provider tests must not run"),
+    )
+
+    assert cli.main(["setup"]) == 1
+
+    captured = capsys.readouterr()
+    assert not UserConfig().path.exists()
+    assert "Codex is not installed" in captured.out
+    assert "Claude Code isn't logged in" in captured.out
+    assert "needs at least one installed and logged-in provider" in captured.err
+    assert "run `kessel setup` again" in captured.err
+
+
+def test_run_before_setup_fails_cleanly_without_creating_config(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("KESSEL_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path / "state"))
+
+    assert cli.main(["run", "--provider", "codex"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "Kessel is not set up. Run: kessel setup\n"
+    assert not UserConfig().path.exists()
 
 
 def test_client_environment_injects_kessel_values(

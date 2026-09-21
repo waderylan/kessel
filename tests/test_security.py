@@ -290,6 +290,59 @@ async def test_health_provider_resolution_uses_short_ttl_cache(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_health_requires_at_least_one_available_provider(monkeypatch) -> None:
+    monkeypatch.setattr("app.main.shutil.which", lambda command: None)
+    app = create_app(settings(), registry=SecurityRegistry())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://127.0.0.1:8000",
+    ) as client:
+        response = await client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "error",
+        "providers": {
+            "codex": {"available": False},
+            "claude": {"available": False},
+        },
+        "message": (
+            "No supported provider CLI is installed. Install Codex or Claude "
+            "Code, then run `kessel setup`."
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_health_accepts_one_available_provider(monkeypatch) -> None:
+    registry = SecurityRegistry()
+    monkeypatch.setattr(
+        registry,
+        "get",
+        lambda name: type("Provider", (), {"command": name})(),
+    )
+    monkeypatch.setattr(
+        "app.main.shutil.which",
+        lambda command: f"/resolved/{command}" if command == "claude" else None,
+    )
+    app = create_app(settings(), registry=registry)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://127.0.0.1:8000",
+    ) as client:
+        response = await client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "providers": {
+            "codex": {"available": False},
+            "claude": {"available": True},
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_health_and_provider_errors_do_not_leak_details() -> None:
     secret = "SECRET_FROM_PROVIDER_STDERR"
     app = create_app(
