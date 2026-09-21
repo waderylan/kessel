@@ -104,11 +104,16 @@ To use Codex for OpenAI-compatible requests:
 eval "$(kessel env --provider codex)"
 ```
 
-For PowerShell or Fish, print assignments in the matching syntax and apply the displayed commands in your shell:
+For PowerShell, evaluate the generated assignments in the current session:
 
-```text
-kessel env --provider codex --shell powershell
-kessel env --provider codex --shell fish
+```powershell
+Invoke-Expression ((kessel env --provider codex --shell powershell) -join "`n")
+```
+
+For Fish:
+
+```fish
+kessel env --provider codex --shell fish | source
 ```
 
 The output sets:

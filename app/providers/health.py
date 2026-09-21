@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import platform
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -44,19 +46,48 @@ def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _resolve_executable(command: str) -> str | None:
+    """Resolve provider commands to binaries safe for shell-free execution."""
+
+    executable = shutil.which(command)
+    if executable is None:
+        return None
+    shim = Path(executable)
+    if command != "codex" or shim.suffix.lower() not in {".cmd", ".bat"}:
+        return executable
+
+    package_root = (
+        shim.parent
+        / "node_modules"
+        / "@openai"
+        / "codex"
+        / "node_modules"
+        / "@openai"
+    )
+    arm64 = platform.machine().lower() in {"arm64", "aarch64"}
+    package = "codex-win32-arm64" if arm64 else "codex-win32-x64"
+    target = "aarch64-pc-windows-msvc" if arm64 else "x86_64-pc-windows-msvc"
+    native = (
+        package_root / package / "vendor" / target / "bin" / "codex.exe"
+    )
+    if native.is_file():
+        return str(native.resolve())
+    return executable
+
+
 def _check_provider(
     name: str,
     display_name: str,
     command: str,
     auth_args: list[str],
 ) -> ProviderHealth:
-    executable = shutil.which(command)
+    executable = _resolve_executable(command)
     if executable is None:
         return ProviderHealth(name, display_name, False, False)
     try:
-        version_result = _run([command, "--version"])
+        version_result = _run([executable, "--version"])
         version = (version_result.stdout or version_result.stderr).strip() or None
-        auth_result = _run([command, *auth_args])
+        auth_result = _run([executable, *auth_args])
     except (OSError, subprocess.TimeoutExpired) as exc:
         return ProviderHealth(
             name,

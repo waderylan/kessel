@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -96,6 +97,8 @@ def test_setup_is_idempotent(
     assert "Generated a local API key" in first_output
     assert first_key not in first_output
     assert "run `kessel key` to reveal it" in first_output
+    if os.name == "nt":
+        assert "Invoke-Expression ((kessel env --provider codex" in first_output
 
     assert cli.main(["setup"]) == 0
     second_output = capsys.readouterr().out

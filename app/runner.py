@@ -54,6 +54,27 @@ class ProcessExitError(ProcessError):
         super().__init__(f"provider process exited with code {return_code}")
 
 
+def provider_process_options() -> dict[str, object]:
+    """Return isolated process options without opening a Windows console."""
+
+    if os.name == "nt":
+        return {
+            "creationflags": (
+                subprocess.CREATE_NEW_PROCESS_GROUP
+                | subprocess.CREATE_NO_WINDOW
+            )
+        }
+    return {"start_new_session": True}
+
+
+def hidden_process_options() -> dict[str, object]:
+    """Prevent Windows helper processes from opening a console window."""
+
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 def provider_error_from_message(
     message: str,
     retry_after_seconds: int | None = None,
@@ -274,12 +295,6 @@ class ProcessRunner:
         if executable is None:
             raise ProcessNotFoundError(f"command not found: {command[0]}")
 
-        process_options: dict[str, object] = {}
-        if os.name == "nt":
-            process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            process_options["start_new_session"] = True
-
         env = child_environment(env_overrides)
         try:
             process = await asyncio.create_subprocess_exec(
@@ -290,7 +305,7 @@ class ProcessRunner:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                **process_options,
+                **provider_process_options(),
             )
         except FileNotFoundError as exc:
             raise ProcessNotFoundError(
@@ -355,6 +370,7 @@ class ProcessRunner:
                 "/F",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                **hidden_process_options(),
             )
             await killer.wait()
             if process.returncode is None:

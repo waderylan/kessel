@@ -7,7 +7,6 @@ import json
 import os
 import shutil
 import signal
-import subprocess
 import tempfile
 import time
 from collections.abc import AsyncIterator, Sequence
@@ -27,6 +26,8 @@ from app.runner import (
     ProcessNotFoundError,
     ProcessOutputLimitError,
     ProcessTimeoutError,
+    hidden_process_options,
+    provider_process_options,
     provider_error_from_message,
 )
 
@@ -96,13 +97,6 @@ class CodexAppServer:
             ) = await asyncio.to_thread(self._prepare_runtime)
             command = self._build_command(executable)
             env = child_environment({"CODEX_HOME": str(isolated_home)})
-            process_options: dict[str, object] = {}
-            if os.name == "nt":
-                process_options["creationflags"] = (
-                    subprocess.CREATE_NEW_PROCESS_GROUP
-                )
-            else:
-                process_options["start_new_session"] = True
 
             self._generation += 1
             generation = self._generation
@@ -115,7 +109,7 @@ class CodexAppServer:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    **process_options,
+                    **provider_process_options(),
                 )
                 self._process = process
                 self._process_guard = ProcessGroupGuard.attach(process)
@@ -595,6 +589,7 @@ class CodexAppServer:
                 "/F",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                **hidden_process_options(),
             )
             await killer.wait()
             if process.returncode is None:

@@ -235,7 +235,7 @@
 - Evidence and reproduction: a command argument containing `%n`, `$HOME`, quotes, and spaces was not escaped for systemd in the baseline. `tests/test_security.py::test_systemd_escaping_handles_special_path_characters` covers these cases.
 - Impact: service startup corruption for unusual paths and disk exhaustion from persistent CLI diagnostics.
 - Recommended fix: escape systemd `%`, `$`, backslash, and quotes; use plist argument arrays; avoid persistent provider log files when request logging already excludes content.
-- Resolution: custom systemd escaping is used, service/plist files are mode `0600`, launchd output is sent to the null device, and all service types remain per-user/non-elevated.
+- Resolution: custom systemd escaping is used, service/plist files are mode `0600`, launchd output is sent to the null device, and all service types remain per-user/non-elevated. Windows startup uses the current user's `HKCU` Run entry rather than the administrator-only `schtasks /Create` path.
 
 ### L-04 — Version enforcement and dependency constraints allowed known-unsafe combinations
 
@@ -316,7 +316,7 @@
 - Argument injection: request models must be provider aliases, previously observed exact IDs, or current exact Codex discovery results. Reasoning and service tier are Pydantic literals. Hostile model regression returns `400` before spawning.
 - Child environment: only required OS, path, home, locale, temp, and explicit provider settings survive. Proxy variables and unrelated secrets are removed.
 - Temporary directories: `tempfile.TemporaryDirectory` supplies unpredictable per-request paths; cleanup runs in `finally`. Warm cleanup is shielded/retried after the full process tree exits.
-- Binary resolution: setup records `shutil.which()` absolute paths. Config host/path validation rejects malformed config; subprocesses always use argument arrays and no shell.
+- Binary resolution: setup records absolute executable paths. On Windows it resolves the npm `codex.cmd` shim to Codex's packaged native executable so shell-free subprocess execution remains valid. Config host/path validation rejects malformed config; subprocesses always use argument arrays and no shell.
 
 ### Isolation and statelessness
 
@@ -333,7 +333,7 @@
 - Pipe draining: stdout and stderr are started and drained concurrently for fresh commands; warm stdout/stderr have independent reader tasks.
 - Semaphore safety: provider slots use `async with`; timeout, provider exception, cancellation, and stream close release slots in `tests/test_concurrency.py`.
 - Disconnect handling: stream finalizers close provider generators; fresh process groups are killed/reaped and warm turns receive `turn/interrupt`.
-- Process groups: POSIX sessions use `killpg`; Windows uses kill-on-close Job Objects with a Toolhelp descendant fallback. Cancellation tests verify no delayed marker is written by a surviving child.
+- Process groups: POSIX sessions use `killpg`; Windows uses kill-on-close Job Objects with a Toolhelp descendant fallback. Windows provider and cleanup processes also use `CREATE_NO_WINDOW`, so background requests do not allocate visible console windows. Cancellation tests verify no delayed marker is written by a surviving child.
 - Warm routing/crashes: ID-specific futures and thread/turn queues prevent cross-request delivery. Reader failure atomically fails in-flight requests, clears state, and permits a clean restart.
 - Bounds: request body, stdout/stderr, NDJSON lines, warm text, warm queues, message count, tool count, schema depth, concurrency, slot wait, request duration, and shutdown grace are bounded.
 - Shutdown: new work is rejected, in-flight tasks receive the configured grace period, remaining work is cancelled, and fresh/warm process trees are reaped.
@@ -350,16 +350,16 @@
 
 ### Service and packaging
 
-- Service privilege: Windows uses Task Scheduler `/RL LIMITED`; Linux uses `systemctl --user`; macOS installs a user LaunchAgent. No path requests elevation.
-- Service files: Windows uses `subprocess.list2cmdline`; launchd uses `ProgramArguments`; systemd special-character escaping has a regression test. Unit/plist files are `0600` on POSIX.
-- Logs: application logs exclude content and credentials. launchd does not retain provider output; systemd journald and Windows Task Scheduler own rotation/retention outside Kessel.
+- Service privilege: Windows uses an `HKCU` Run entry and a detached current-user process; Linux uses `systemctl --user`; macOS installs a user LaunchAgent. No path requests elevation.
+- Service files: Windows serializes the current-user startup command with `subprocess.list2cmdline`; launchd uses `ProgramArguments`; systemd special-character escaping has a regression test. Unit/plist files are `0600` on POSIX.
+- Logs: application logs exclude content and credentials. Windows and launchd discard background standard streams; systemd journald owns Linux retention outside Kessel.
 - Packages: clean isolated sdist/wheel builds succeeded. Wheel contents were limited to `app/`, static/provider assets, and distribution metadata. The sdist included source, tests, README, and build metadata but no `.env`, auth/config, local probe, or secret file. `app` matches the configured top-level package.
 - Dependencies: runtime, dev, and build dependencies are exactly pinned; the post-fix advisory scan found no known vulnerabilities.
 - Version gate: exact supported Codex/Claude versions are checked at startup by default and cannot be disabled accidentally by an absent environment variable.
 
 ### Setup and CLI
 
-- Idempotency: `with_generated_key()` preserves an existing key; service installation uses force/update semantics without duplicate service identities; setup tests cover repeated runs.
+- Idempotency: `with_generated_key()` preserves an existing key; service installation updates one stable per-user identity without duplicates; setup tests cover repeated runs.
 - Missing/malformed config: missing config uses validated defaults but service startup fails without a key. Invalid JSON, host, port, or field types raise a concise configuration error rather than starting insecurely.
 - Doctor/status: code and captured-output review found no API key printing. Only explicit `kessel key` prints it; `--copy` avoids stdout.
 

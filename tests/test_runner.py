@@ -1,4 +1,6 @@
 import asyncio
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -8,8 +10,20 @@ from app.runner import (
     ProcessNotFoundError,
     ProcessRunner,
     ProviderAuthenticationError,
+    hidden_process_options,
+    provider_process_options,
     provider_error_from_message,
 )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process flags")
+def test_provider_processes_never_open_console_windows() -> None:
+    provider_flags = int(provider_process_options()["creationflags"])
+    helper_flags = int(hidden_process_options()["creationflags"])
+
+    assert provider_flags & subprocess.CREATE_NEW_PROCESS_GROUP
+    assert provider_flags & subprocess.CREATE_NO_WINDOW
+    assert helper_flags & subprocess.CREATE_NO_WINDOW
 
 
 def test_provider_login_error_is_classified() -> None:

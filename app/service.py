@@ -12,6 +12,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+try:
+    import winreg
+except ImportError:  # pragma: no cover - only available on Windows
+    winreg = None  # type: ignore[assignment]
+
 from app.user_config import UserConfig, state_directory
 
 
@@ -32,6 +37,10 @@ class ServiceManager:
     @property
     def log_directory(self) -> Path:
         return state_directory() / "logs"
+
+    @property
+    def stop_request_path(self) -> Path:
+        return state_directory() / "stop.request"
 
     def is_running(self, timeout: float = 1.0) -> bool:
         request = urllib.request.Request(self.config.base_url + "/health")
@@ -73,7 +82,7 @@ class ServiceManager:
 
     def stop(self) -> None:
         if sys.platform == "win32":
-            self._run(["schtasks", "/End", "/TN", "Kessel"], allow_failure=True)
+            self._stop_windows()
         elif sys.platform == "darwin":
             plist_path = Path.home() / "Library" / "LaunchAgents" / "dev.kessel.api.plist"
             self._run(
@@ -100,29 +109,68 @@ class ServiceManager:
         return False
 
     def _install_windows(self) -> None:
-        task_command = subprocess.list2cmdline(self.command)
-        result = self._run(
-            [
-                "schtasks",
-                "/Create",
-                "/F",
-                "/TN",
-                "Kessel",
-                "/SC",
-                "ONLOGON",
-                "/RL",
-                "LIMITED",
-                "/TR",
-                task_command,
-            ],
-            allow_failure=True,
-        )
-        if result.returncode != 0:
+        if winreg is None:
+            raise ServiceError("Windows startup registration is unavailable")
+        command = subprocess.list2cmdline(self._windows_command())
+        try:
+            with winreg.CreateKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+            ) as key:
+                winreg.SetValueEx(key, "Kessel", 0, winreg.REG_SZ, command)
+        except OSError as exc:
             raise ServiceError(
-                "Could not install the Kessel scheduled task: "
-                + (result.stderr or result.stdout).strip()
+                f"Could not register Kessel for the current user: {exc}"
+            ) from exc
+
+        self.clear_stop_request()
+        creation_flags = (
+            subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NO_WINDOW
+        )
+        try:
+            subprocess.Popen(
+                self._windows_command(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                creationflags=creation_flags,
             )
-        self._run(["schtasks", "/Run", "/TN", "Kessel"])
+        except OSError as exc:
+            raise ServiceError(f"Could not start Kessel: {exc}") from exc
+
+    def _windows_command(self) -> list[str]:
+        executable = Path(sys.executable)
+        pythonw = executable.with_name("pythonw.exe")
+        return [
+            str(pythonw if pythonw.exists() else executable),
+            "-m",
+            "app.cli",
+            "serve",
+        ]
+
+    def _stop_windows(self) -> None:
+        if not self.is_running():
+            self.clear_stop_request()
+            return
+        path = self.stop_request_path
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_text("stop\n", encoding="utf-8")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if not self.is_running():
+                self.clear_stop_request()
+                return
+            time.sleep(0.2)
+        raise ServiceError("Kessel did not stop within 15 seconds")
+
+    def clear_stop_request(self) -> None:
+        try:
+            self.stop_request_path.unlink()
+        except FileNotFoundError:
+            pass
 
     def _install_linux(self) -> None:
         unit_directory = Path.home() / ".config" / "systemd" / "user"

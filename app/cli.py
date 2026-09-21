@@ -8,6 +8,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
@@ -217,6 +218,15 @@ def command_setup() -> int:
     print(f"OpenAI base URL (Codex):  {config.base_url}/v1/codex")
     print(f"Anthropic base URL:       {config.base_url}")
     print("API key:                  run `kessel key` to reveal it")
+    if os.name == "nt":
+        print("\nLoad Codex into this PowerShell session:")
+        print(
+            'Invoke-Expression ((kessel env --provider codex '
+            '--shell powershell) -join "`n")'
+        )
+    else:
+        print("\nLoad Codex into this shell session:")
+        print('eval "$(kessel env --provider codex)"')
     return 1 if tests_failed else 0
 
 
@@ -240,12 +250,32 @@ def command_serve() -> int:
     config = UserConfig.load()
     if not (os.getenv("KESSEL_API_KEY") or config.api_key):
         raise RuntimeError("Kessel is not set up. Run: kessel setup")
-    uvicorn.run(
-        "app.main:app",
-        host=config.host,
-        port=config.port,
-        workers=1,
+    manager = ServiceManager(config)
+    manager.clear_stop_request()
+    uvicorn_config = uvicorn.Config(
+        "app.main:app", host=config.host, port=config.port, workers=1
     )
+    server = uvicorn.Server(uvicorn_config)
+    watcher_done = threading.Event()
+
+    def watch_for_stop() -> None:
+        while not watcher_done.wait(0.2):
+            if manager.stop_request_path.exists():
+                server.should_exit = True
+                return
+
+    watcher = threading.Thread(
+        target=watch_for_stop,
+        name="kessel-stop-watcher",
+        daemon=True,
+    )
+    watcher.start()
+    try:
+        server.run()
+    finally:
+        watcher_done.set()
+        watcher.join(timeout=1)
+        manager.clear_stop_request()
     return 0
 
 
