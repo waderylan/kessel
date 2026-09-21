@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <iterator>
 #include <string>
@@ -11,7 +12,12 @@ using json = nlohmann::json;
 int main(int argc, char** argv) {
   std::vector<std::string> arguments(argv + 1, argv + argc);
   if (std::find(arguments.begin(), arguments.end(), "--version") != arguments.end()) {
-    std::cout << "codex-cli 0.155.1\n";
+    std::string executable = argv[0];
+    std::transform(executable.begin(), executable.end(), executable.begin(),
+                   [](unsigned char value) { return std::tolower(value); });
+    std::cout << (executable.find("claude") == std::string::npos
+                      ? "codex-cli 0.155.1\n"
+                      : "2.1.278 (Claude Code)\n");
     return 0;
   }
   if (std::find(arguments.begin(), arguments.end(), "status") != arguments.end()) {

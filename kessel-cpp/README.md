@@ -50,6 +50,10 @@ kessel-cpp run --provider codex -- <application command>
 kessel-cpp serve
 ```
 
+One installed and logged-in provider is enough. Setup configures and tests the
+available provider. If neither provider is ready, setup exits without creating
+an API key and prints the install or login commands needed to continue.
+
 Configuration is compatible with Python Kessel's `config.json`. For isolated
 testing, set `KESSEL_CONFIG_DIR` and `KESSEL_STATE_DIR` to directories under
 this project.

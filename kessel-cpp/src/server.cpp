@@ -158,10 +158,16 @@ static std::string parse_version(const std::string& text) {
 }
 
 static void verify_versions(const Settings& settings) {
+  int available = 0;
   for (const auto& [name, command, expected] : std::vector<std::tuple<std::string, std::string, std::string>>{{"codex", settings.codex_command, settings.expected_codex_version}, {"claude", settings.claude_command, settings.expected_claude_version}}) {
+    if (!find_executable(command)) continue;
+    ++available;
     auto result = run_process({command, "--version"}, "", fs::current_path(), 10, 65'536); auto actual = parse_version(result.out + result.err);
     if (actual != expected) throw Error("Refusing to start with untested CLI versions: " + name + " " + actual + " (tested: " + expected + ")", 1, "version_error");
   }
+  if (available == 0)
+    throw Error("Kessel needs at least one installed provider CLI: Codex or Claude Code",
+                1, "version_error");
 }
 
 int run_server(const Settings& settings) {
@@ -211,7 +217,17 @@ int run_server(const Settings& settings) {
     response.set_header("Access-Control-Allow-Methods", "GET, POST"); response.set_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, Anthropic-Version, X-Request-ID"); response.status = 204;
   });
   server.Get("/health", [&](const httplib::Request&, httplib::Response& response) {
-    json_response(response, 200, {{"status", "ok"}, {"providers", provider_health()}});
+    const auto providers = provider_health();
+    const bool available = providers["codex"]["available"].get<bool>() ||
+                           providers["claude"]["available"].get<bool>();
+    if (!available) {
+      json_response(response, 503,
+          {{"status", "error"}, {"providers", providers},
+           {"message", "No supported provider CLI is installed. Install Codex or "
+                       "Claude Code, then run `kessel-cpp setup`."}});
+      return;
+    }
+    json_response(response, 200, {{"status", "ok"}, {"providers", providers}});
   });
   server.Get(R"(/v1/(codex|claude)/models)", [&](const httplib::Request& request, httplib::Response& response) {
     const auto id = response.get_header_value("X-Request-ID"); try { require_key(request, settings); auto provider = provider_from_path(request); auto lease = registry.slots(provider).acquire(registry.slot_wait_seconds, provider); auto models = registry.get(provider).models(); json data = json::array(); for (const auto& model : models) data.push_back({{"id", model}, {"object", "model"}, {"created", 0}, {"owned_by", provider}}); response.set_header("X-Kessel-Model-Discovery", provider == "codex" ? "provider" : "confirmed-this-process"); json_response(response, 200, {{"object", "list"}, {"data", data}}); } catch (const Error& error) { error_response(request, response, error, id); } catch (const std::exception&) { error_response(request, response, ProcessError("provider request failed"), id); }

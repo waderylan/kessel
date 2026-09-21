@@ -100,4 +100,16 @@ if(BUILD_TESTING)
   set_tests_properties(kessel_cpp_self_test PROPERTIES
     ENVIRONMENT "KESSEL_CONFIG_DIR=${CMAKE_BINARY_DIR}/test-state/config;KESSEL_STATE_DIR=${CMAKE_BINARY_DIR}/test-state/state"
   )
+  if(WIN32)
+    find_program(KESSEL_POWERSHELL powershell REQUIRED)
+    add_test(
+      NAME kessel_cpp_cli_availability
+      COMMAND "${KESSEL_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
+              -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli-availability.ps1"
+              -Binary "$<TARGET_FILE:kessel-cpp>"
+              -MockProvider "$<TARGET_FILE:kessel-mock-provider>"
+              -TestRoot "${CMAKE_BINARY_DIR}/cli-availability-state"
+    )
+    set_tests_properties(kessel_cpp_cli_availability PROPERTIES RUN_SERIAL TRUE)
+  endif()
 endif()

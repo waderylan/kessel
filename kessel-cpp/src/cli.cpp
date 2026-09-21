@@ -34,7 +34,7 @@ static bool is_running(const UserConfig& config, int timeout_seconds = 1) {
 }
 
 static UserConfig configured() {
-  auto config = UserConfig::load(); if (!config.api_key || config.api_key->empty()) throw Error("Kessel is not set up. Run: kessel setup", 1); return config;
+  auto config = UserConfig::load(); if (!config.api_key || config.api_key->empty()) throw Error("Kessel is not set up. Run: kessel-cpp setup", 1); return config;
 }
 
 static std::string shell_quote(const std::string& value, const std::string& shell) {
@@ -229,48 +229,72 @@ int run_cli(int argc, char** argv) {
   if (command == "doctor") { auto checks = check_providers(); print_doctor(checks); return std::any_of(checks.begin(), checks.end(), [](const auto& item) { return item.installed && item.authenticated; }) ? 0 : 1; }
   if (command == "setup") {
     std::cout << "Checking providers...\n"; auto checks = check_providers(); print_doctor(checks);
+    std::vector<const Health*> working;
+    for (const auto& check : checks)
+      if (check.installed && check.authenticated) working.push_back(&check);
+    if (working.empty()) {
+      std::cerr << "[error] Kessel needs at least one installed and logged-in provider.\n"
+                << "Install or log in to Codex or Claude Code using the guidance above, "
+                   "then run `kessel-cpp setup` again.\n";
+      return 1;
+    }
+    if (working.size() == 1)
+      std::cout << "[ok] " << working.front()->display
+                << " is ready. Kessel will use that provider; the other provider is optional.\n";
+    else
+      std::cout << "[ok] Codex and Claude Code are both ready.\n";
     auto old = UserConfig::load(); const bool created = !old.api_key || old.api_key->empty();
     auto config = old.with_generated_key();
-    for (const auto& check : checks) {
-      if (check.name == "codex" && check.installed) config.codex_command = check.command;
-      if (check.name == "claude" && check.installed) config.claude_command = check.command;
+    for (const auto* check : working) {
+      if (check->name == "codex") config.codex_command = check->command;
+      if (check->name == "claude") config.claude_command = check->command;
     }
     config.save();
     std::cout << (created ? "[ok] Generated a local API key\n" : "[ok] API key already exists\n");
-    const auto working = std::count_if(checks.begin(), checks.end(), [](const auto& item) { return item.installed && item.authenticated; });
     bool owned = false; bool tests_failed = false;
-    if (working == 0) std::cout << "[warning] No provider is ready; install or log in to one using the command above.\n";
-    else {
-      if (!is_running(config)) {
+    if (!is_running(config)) {
 #ifdef _WIN32
-        auto process = spawn({own_executable().string(), "serve"}, true);
-        CloseHandle(process.hThread); CloseHandle(process.hProcess);
+      auto process = spawn({own_executable().string(), "serve"}, true);
+      CloseHandle(process.hThread); CloseHandle(process.hProcess);
 #else
-        const auto child = fork();
-        if (child == 0) { setsid(); execl(own_executable().c_str(), own_executable().c_str(), "serve", nullptr); _exit(127); }
-        if (child < 0) throw Error("Could not start temporary Kessel", 1);
+      const auto child = fork();
+      if (child == 0) { setsid(); execl(own_executable().c_str(), own_executable().c_str(), "serve", nullptr); _exit(127); }
+      if (child < 0) throw Error("Could not start temporary Kessel", 1);
 #endif
-        owned = true;
-        for (int count = 0; count < 100 && !is_running(config); ++count)
-          std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        if (!is_running(config)) throw Error("temporary server did not become ready within 20 seconds", 1);
-        std::cout << "[ok] Temporary Kessel started for provider tests\n";
-      } else std::cout << "[ok] Existing Kessel server detected; using it for provider tests\n";
-      for (const auto& check : checks) if (check.installed && check.authenticated) {
-        const auto [success, detail] = test_provider_request(config, check.name);
-        std::cout << (success ? "[ok] " : "[error] ") << check.display
-                  << " test request " << (success ? "succeeded: " : "failed: ")
-                  << detail << '\n';
-        tests_failed |= !success;
-      }
-      if (owned) {
-        request_stop();
-        for (int count = 0; count < 75 && is_running(config); ++count)
-          std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        std::cout << "[ok] Temporary Kessel stopped\n";
-      }
+      owned = true;
+      for (int count = 0; count < 100 && !is_running(config); ++count)
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      if (!is_running(config)) throw Error("temporary server did not become ready within 20 seconds", 1);
+      std::cout << "[ok] Temporary Kessel started for provider tests\n";
+    } else std::cout << "[ok] Existing Kessel server detected; using it for provider tests\n";
+    for (const auto* check : working) {
+      const auto [success, detail] = test_provider_request(config, check->name);
+      std::cout << (success ? "[ok] " : "[error] ") << check->display
+                << " test request " << (success ? "succeeded: " : "failed: ")
+                << detail << '\n';
+      tests_failed |= !success;
     }
-    std::cout << "\nConnection details\nOpenAI base URL (Claude): " << config.base_url() << "/v1/claude\nOpenAI base URL (Codex):  " << config.base_url() << "/v1/codex\nAnthropic base URL:       " << config.base_url() << "\nAPI key:                  run `kessel-cpp key` to reveal it\n\nRun an application with managed settings:\nkessel-cpp run --provider codex -- your_app\nSetup does not leave Kessel running in the background.\n";
+    if (owned) {
+      request_stop();
+      for (int count = 0; count < 75 && is_running(config); ++count)
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      std::cout << "[ok] Temporary Kessel stopped\n";
+    }
+    std::cout << "\nConnection details\n";
+    const auto has_provider = [&](std::string_view name) {
+      return std::any_of(working.begin(), working.end(), [&](const auto* item) {
+        return item->name == name;
+      });
+    };
+    if (has_provider("claude"))
+      std::cout << "OpenAI base URL (Claude): " << config.base_url()
+                << "/v1/claude\nAnthropic base URL:       " << config.base_url() << '\n';
+    if (has_provider("codex"))
+      std::cout << "OpenAI base URL (Codex):  " << config.base_url() << "/v1/codex\n";
+    std::cout << "API key:                  run `kessel-cpp key` to reveal it\n\n"
+              << "Run an application with managed settings:\n"
+              << "kessel-cpp run --provider " << working.front()->name
+              << " -- your_app\nSetup does not leave Kessel running in the background.\n";
     return tests_failed ? 1 : 0;
   }
   if (command == "env") { std::string provider = "claude", shell = "posix"; for (int i = 2; i < argc; ++i) { if (std::string(argv[i]) == "--provider" && i + 1 < argc) provider = argv[++i]; else if (std::string(argv[i]) == "--shell" && i + 1 < argc) shell = argv[++i]; } if (provider != "codex" && provider != "claude") throw Error("invalid provider", 2); std::cout << render_env(configured(), provider, shell) << '\n'; return 0; }
