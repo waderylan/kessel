@@ -24,6 +24,15 @@ class FakeRegistry:
     ) -> None:
         self.value = (key, name, reserved, kind, value)
 
+    def OpenKey(self, root: object, path: str):
+        self.created = (root, path)
+        return nullcontext("key")
+
+    def QueryValueEx(self, key: object, name: str) -> tuple[str, int]:
+        if name != "Kessel":
+            raise FileNotFoundError(name)
+        return "pythonw -m app.cli serve", self.REG_SZ
+
 
 def test_windows_install_uses_current_user_startup_without_schtasks(
     tmp_path: Path, monkeypatch
@@ -66,3 +75,12 @@ def test_windows_install_uses_current_user_startup_without_schtasks(
     assert spawned[0][1]["stdin"] is subprocess.DEVNULL
     assert spawned[0][1]["stdout"] is subprocess.DEVNULL
     assert spawned[0][1]["stderr"] is subprocess.DEVNULL
+
+
+def test_windows_registration_detection(monkeypatch) -> None:
+    registry = FakeRegistry()
+    monkeypatch.setattr(service.sys, "platform", "win32")
+    monkeypatch.setattr(service, "winreg", registry)
+    manager = ServiceManager(UserConfig(api_key="secret"))
+
+    assert manager.is_registered()

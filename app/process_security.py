@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import os
+import signal
 from ctypes import wintypes
 from dataclasses import dataclass
 
@@ -237,6 +238,11 @@ class ProcessGroupGuard:
             self.terminate()
         elif os.name == "nt" and self.root_pid is not None:
             await asyncio.to_thread(_terminate_descendants, self.root_pid)
+        elif self.root_pid is not None:
+            try:
+                os.killpg(self.root_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
     def terminate(self) -> None:
         if self.handle is not None and os.name == "nt":
@@ -256,6 +262,11 @@ class ProcessGroupGuard:
             for process_handle in wait_handles:
                 _kernel32.WaitForSingleObject(process_handle, 2000)
                 _kernel32.CloseHandle(process_handle)
+        elif os.name != "nt" and self.root_pid is not None:
+            try:
+                os.killpg(self.root_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
     async def close(self) -> None:
         watcher = self.watcher

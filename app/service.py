@@ -59,6 +59,27 @@ class ServiceManager:
         except (OSError, ValueError, urllib.error.URLError):
             return False
 
+    def is_registered(self) -> bool:
+        """Return whether the per-user durable service has been installed."""
+
+        if sys.platform == "win32":
+            if winreg is None:
+                return False
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Run",
+                ) as key:
+                    winreg.QueryValueEx(key, "Kessel")
+                return True
+            except OSError:
+                return False
+        if sys.platform == "darwin":
+            return (
+                Path.home() / "Library" / "LaunchAgents" / "dev.kessel.api.plist"
+            ).exists()
+        return (Path.home() / ".config" / "systemd" / "user" / "kessel.service").exists()
+
     def ensure_running(self) -> bool:
         """Install/start when needed. Return True when work was required."""
 
@@ -99,6 +120,20 @@ class ServiceManager:
                 ["systemctl", "--user", "stop", "kessel.service"],
                 allow_failure=True,
             )
+
+    def request_stop(self) -> None:
+        path = self.stop_request_path
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_text("stop\n", encoding="utf-8")
+
+    def wait_until_stopped(self, timeout: float = 15.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self.is_running():
+                self.clear_stop_request()
+                return True
+            time.sleep(0.2)
+        return False
 
     def wait_until_running(self, timeout: float = 20.0) -> bool:
         deadline = time.monotonic() + timeout
@@ -155,16 +190,9 @@ class ServiceManager:
         if not self.is_running():
             self.clear_stop_request()
             return
-        path = self.stop_request_path
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path.write_text("stop\n", encoding="utf-8")
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            if not self.is_running():
-                self.clear_stop_request()
-                return
-            time.sleep(0.2)
-        raise ServiceError("Kessel did not stop within 15 seconds")
+        self.request_stop()
+        if not self.wait_until_stopped():
+            raise ServiceError("Kessel did not stop within 15 seconds")
 
     def clear_stop_request(self) -> None:
         try:

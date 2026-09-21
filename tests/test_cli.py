@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 import pytest
@@ -77,19 +76,15 @@ def test_setup_is_idempotent(
         lambda value: pytest.fail("setup must not copy secrets to the clipboard"),
     )
 
-    changes = iter((True, False))
+    test_calls: list[list[ProviderHealth]] = []
 
-    class FakeServiceManager:
-        def __init__(self, config: UserConfig) -> None:
-            self.config = config
+    async def fake_setup_tests(
+        config: UserConfig, working: list[ProviderHealth]
+    ) -> bool:
+        test_calls.append(working)
+        return False
 
-        def ensure_running(self) -> bool:
-            return next(changes)
-
-        def wait_until_running(self) -> bool:
-            return True
-
-    monkeypatch.setattr(cli, "ServiceManager", FakeServiceManager)
+    monkeypatch.setattr(cli, "_setup_provider_tests", fake_setup_tests)
 
     assert cli.main(["setup"]) == 0
     first_key = UserConfig.load().api_key
@@ -97,14 +92,71 @@ def test_setup_is_idempotent(
     assert "Generated a local API key" in first_output
     assert first_key not in first_output
     assert "run `kessel key` to reveal it" in first_output
-    if os.name == "nt":
-        assert "Invoke-Expression ((kessel env --provider codex" in first_output
+    assert "kessel run --provider codex -- python your_app.py" in first_output
+    assert "does not leave Kessel running" in first_output
 
     assert cli.main(["setup"]) == 0
     second_output = capsys.readouterr().out
     assert "API key already exists" in second_output
-    assert "Background service is already running" in second_output
     assert UserConfig.load().api_key == first_key
+    assert len(test_calls) == 2
+
+
+def test_client_environment_injects_kessel_values(
+    configured: UserConfig, monkeypatch
+) -> None:
+    monkeypatch.setenv("KEEP_ME", "yes")
+
+    environment = cli.client_environment(configured, "codex")
+
+    assert environment["KEEP_ME"] == "yes"
+    assert environment["OPENAI_BASE_URL"].endswith("/v1/codex")
+    assert environment["OPENAI_API_KEY"] == "kessel_test_real_key"
+    assert environment["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8000"
+    assert environment["ANTHROPIC_API_KEY"] == "kessel_test_real_key"
+
+
+def test_run_reports_durable_kessel(
+    configured: UserConfig, monkeypatch, capsys
+) -> None:
+    async def fake_acquire(config: UserConfig, provider: str):
+        return "durable", None, None
+
+    monkeypatch.setattr(cli, "_acquire_runtime", fake_acquire)
+
+    assert cli.main(["run", "--provider", "codex"]) == 0
+    output = capsys.readouterr().out
+    assert "Durable Kessel detected" in output
+    assert "No application command was supplied" in output
+
+
+def test_run_passes_application_as_an_argument_array(
+    configured: UserConfig, monkeypatch
+) -> None:
+    received: list[str] = []
+
+    async def fake_acquire(config: UserConfig, provider: str):
+        return "durable", None, None
+
+    async def fake_run_application(
+        config: UserConfig,
+        provider: str,
+        command: list[str],
+        expected_session,
+    ) -> int:
+        received.extend(command)
+        return 7
+
+    monkeypatch.setattr(cli, "_acquire_runtime", fake_acquire)
+    monkeypatch.setattr(cli, "_run_application", fake_run_application)
+
+    assert (
+        cli.main(
+            ["run", "--provider", "codex", "--", "python", "app.py", "a b"]
+        )
+        == 7
+    )
+    assert received == ["python", "app.py", "a b"]
 
 
 def test_key_rotation_does_not_print_secret(
@@ -137,5 +189,5 @@ def test_status_has_actionable_not_running_error(
     assert cli.main(["status"]) == 1
     assert (
         capsys.readouterr().err
-        == "Kessel isn't running. Start it with: kessel start\n"
+        == "Kessel isn't running. Use: kessel run --provider codex or kessel start\n"
     )
