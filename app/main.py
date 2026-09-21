@@ -9,6 +9,7 @@ import shutil
 import secrets
 import time
 import uuid
+from datetime import datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -41,6 +42,7 @@ from app.runner import (
     ProcessRunner,
     ProcessTimeoutError,
     ProviderBusyError,
+    ProviderAuthenticationError,
     ProviderRateLimitError,
 )
 from app.versioning import verify_cli_versions
@@ -237,7 +239,13 @@ def create_app(
         if not supplied_key and x_api_key:
             supplied_key = x_api_key
         if not secrets.compare_digest(supplied_key, expected_key):
-            raise HTTPException(status_code=401, detail="Invalid API key")
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Wrong or missing API key. Send it in Authorization: Bearer "
+                    "<key> or X-API-Key. Run kessel key to see yours"
+                ),
+            )
 
     def error_content(
         message: str, error_type: str, code: str, param: str | None = None
@@ -334,8 +342,29 @@ def create_app(
 
     @application.exception_handler(ProcessError)
     async def provider_error_handler(request: Request, exc: ProcessError) -> JSONResponse:
+        provider_name = (
+            "claude"
+            if request.url.path == "/v1/messages" or "/claude/" in request.url.path
+            else "codex"
+        )
+        process_auth_error = (
+            isinstance(exc, ProcessExitError)
+            and any(
+                marker in exc.stderr.lower()
+                for marker in (
+                    "not logged in",
+                    "not authenticated",
+                    "authentication required",
+                    "please login",
+                    "please log in",
+                    "run /login",
+                )
+            )
+        )
         if isinstance(exc, ProviderBusyError):
             status_code, code = 429, "provider_busy"
+        elif isinstance(exc, ProviderAuthenticationError) or process_auth_error:
+            status_code, code = 503, "provider_not_authenticated"
         elif isinstance(exc, ProviderRateLimitError):
             status_code, code = 429, "rate_limit_exceeded"
         elif isinstance(exc, ProcessNotFoundError):
@@ -354,7 +383,28 @@ def create_app(
             status_code, code = 502, "provider_error"
 
         message = str(exc)
-        if isinstance(exc, ProcessExitError) and exc.stderr:
+        if isinstance(exc, ProviderAuthenticationError) or process_auth_error:
+            auth_provider = (
+                exc.provider
+                if isinstance(exc, ProviderAuthenticationError)
+                else provider_name
+            )
+            display = "Claude Code" if auth_provider == "claude" else "Codex"
+            command = "claude login" if auth_provider == "claude" else "codex login"
+            message = f"{display} isn't logged in. Run: {command}"
+        elif isinstance(exc, ProviderRateLimitError) and exc.retry_after_seconds:
+            reset_at = datetime.fromtimestamp(
+                time.time() + exc.retry_after_seconds
+            ).astimezone()
+            message = (
+                f"{message}. Quota resets at "
+                f"{reset_at.isoformat(timespec='minutes')}"
+            )
+        if (
+            isinstance(exc, ProcessExitError)
+            and exc.stderr
+            and not process_auth_error
+        ):
             message = f"{message}: {exc.stderr[-1000:]}"
         headers = None
         if isinstance(exc, ProviderBusyError):

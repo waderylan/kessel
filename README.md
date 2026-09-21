@@ -1,13 +1,114 @@
 # Kessel
 
-Kessel is a local HTTP compatibility layer for Codex and Claude Code
-subscriptions. It exposes OpenAI-compatible Chat Completions endpoints and an
-Anthropic-compatible Messages endpoint backed by the authenticated provider
-CLIs installed on the same machine.
+```text
+pipx install kessel-local
+kessel setup
+kessel connect cursor
+```
 
-Kessel is designed for stateless, localhost-only operation. Each request uses
-either a fresh provider process or, for warm Codex, a new ephemeral App Server
-thread. Kessel does not resume provider conversations between requests.
+| `kessel connect` target | Paste the output into |
+| --- | --- |
+| `openai-python` | A Python file using the OpenAI SDK |
+| `openai-node` | A JavaScript or TypeScript file using the OpenAI SDK |
+| `anthropic-python` | A Python file using the Anthropic SDK |
+| `anthropic-node` | A JavaScript or TypeScript file using the Anthropic SDK |
+| `curl` | A terminal |
+| `cursor` | Cursor Settings > Models > API Keys |
+| `continue` | Continue's `config.yaml` |
+| `aider` | The terminal where Aider runs |
+
+Kessel turns local Codex and Claude Code subscriptions into an
+OpenAI-compatible Chat Completions API and an Anthropic-compatible Messages
+API. It runs as a per-user background service bound to `127.0.0.1`; it does not
+expose provider credentials or retain conversations.
+
+## Setup
+
+Install at least one provider CLI and log in:
+
+| Provider | Install | Log in |
+| --- | --- | --- |
+| Claude Code | `npm install -g @anthropic-ai/claude-code` | `claude login` |
+| Codex | `npm install -g @openai/codex` | `codex login` |
+
+Python 3.10 or later and `pipx` are required. Then run `kessel setup`. The
+command:
+
+1. Checks whether each provider is installed and logged in, and prints the
+   exact repair command for failures.
+2. Creates a local key beginning with `kessel_` if one does not exist.
+3. Installs and starts a per-user service using systemd, launchd, or Windows
+   Task Scheduler.
+4. Sends a small request through every provider that passed the checks.
+5. Prints the URLs and key, then copies the key to the clipboard when a system
+   clipboard command is available.
+
+The command is idempotent. Running it again preserves the key, keeps a healthy
+service running, and repairs a stopped or missing service. One provider can be
+used when the other is unavailable.
+
+Configuration is stored in `%LOCALAPPDATA%\Kessel\config.json` on Windows and
+`$XDG_CONFIG_HOME/kessel/config.json` (normally `~/.config/kessel/config.json`)
+on macOS and Linux. The file is user-readable only on POSIX systems. Setup also
+records absolute provider executable paths so login-scoped services do not
+depend on the shell's `PATH`.
+
+### Service commands
+
+| Command | Action |
+| --- | --- |
+| `kessel start` | Install the service if needed, then start it |
+| `kessel stop` | Stop the service without deleting configuration |
+| `kessel status` | Print the service URL or the exact start command |
+| `kessel doctor` | Recheck provider installation and login |
+| `kessel key` | Print the configured API key |
+
+The local web client is at `http://127.0.0.1:8000`; OpenAPI documentation is at
+`http://127.0.0.1:8000/docs`.
+
+### Shell environment
+
+`kessel env` prints only shell assignments, so its POSIX output can be
+evaluated directly:
+
+```sh
+eval "$(kessel env)"
+```
+
+The default OpenAI route uses Claude. Select Codex or another shell syntax:
+
+```sh
+kessel env --provider codex
+kessel env --shell fish
+kessel env --shell powershell
+```
+
+The output defines `OPENAI_BASE_URL`, `OPENAI_API_KEY`,
+`ANTHROPIC_BASE_URL`, and `ANTHROPIC_API_KEY`. The Anthropic variables always
+point to Claude because `/v1/messages` is a Claude route.
+
+### Client connection details
+
+Run `kessel connect <tool>` to render a complete snippet containing the real
+local URL and API key. An unrecognized tool name receives the generic
+OpenAI-compatible URL, key, and authentication header.
+
+OpenAI clients use one of these provider-specific base URLs:
+
+```text
+http://127.0.0.1:8000/v1/claude
+http://127.0.0.1:8000/v1/codex
+```
+
+Anthropic clients use the service root:
+
+```text
+http://127.0.0.1:8000
+```
+
+OpenAI clients send `Authorization: Bearer <key>`. Anthropic clients send
+`X-API-Key: <key>`. A rejected key response names both accepted headers and
+points to `kessel key`.
 
 ## Capabilities
 
@@ -42,60 +143,21 @@ flowchart LR
 
 Provider-specific commands and response parsing are isolated in
 `app/providers/`. Public routes preserve the response shape of the selected API
-surface.
+surface. Kessel must run as one asynchronous Uvicorn worker because provider
+semaphores, quota state, request tracking, and the warm Codex server are
+process-local.
 
-## Requirements
+## API authentication
 
-- Python 3.10 or later
-- Codex CLI `0.155.1`, authenticated with `codex login`
-- Claude Code `2.1.278`, authenticated with `claude auth login`
-
-Kessel verifies both CLI versions during startup. Startup fails when a required
-command is missing, its version cannot be parsed, or its version differs from
-the tested version. Set `KESSEL_ENFORCE_CLI_VERSIONS=false` only when validating
-a CLI upgrade.
-
-## Installation
-
-```powershell
-git clone git@github.com:waderylan/kessel.git
-cd kessel
-
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
-```
-
-Start the server on localhost:
-
-```powershell
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
-```
-
-The local web client is available at `http://127.0.0.1:8000`. OpenAPI
-documentation is available at `http://127.0.0.1:8000/docs`.
-
-Kessel MUST run as one asynchronous Uvicorn worker. Provider semaphores,
-observed quota state, in-flight request tracking, and the warm Codex App Server
-are process-local. Multiple workers would create independent limits and warm
-servers, making concurrency and quota behavior inconsistent. Use async
-concurrency within the single worker instead of increasing Uvicorn workers.
-
-## Authentication
-
-Authentication is disabled when `KESSEL_API_KEY` is unset. When configured,
-requests MUST provide the configured value using one of the following headers:
+Requests provide the generated key using either header:
 
 ```http
-Authorization: Bearer <key>
+Authorization: Bearer kessel_...
 ```
 
 ```http
-X-API-Key: <key>
+X-API-Key: kessel_...
 ```
-
-The Anthropic SDK sends `X-API-Key`. OpenAI clients normally send bearer
-authentication.
 
 ## Endpoints
 
@@ -115,11 +177,13 @@ include the Anthropic-compatible `request-id` header.
 Configure an OpenAI client with a provider-specific base URL:
 
 ```python
+import os
+
 from openai import OpenAI
 
 client = OpenAI(
     base_url="http://127.0.0.1:8000/v1/codex",
-    api_key="local",
+    api_key=os.environ["OPENAI_API_KEY"],
 )
 
 response = client.chat.completions.create(
@@ -191,11 +255,13 @@ for chunk in stream:
 Configure an Anthropic client with the server root as its base URL:
 
 ```python
+import os
+
 from anthropic import Anthropic
 
 client = Anthropic(
     base_url="http://127.0.0.1:8000",
-    api_key="local",
+    api_key=os.environ["ANTHROPIC_API_KEY"],
 )
 
 message = client.messages.create(
@@ -382,6 +448,16 @@ Provider process failures, timeouts, missing executables, output-size limits,
 and subscription rate limits are mapped to provider-appropriate HTTP status
 codes.
 
+Common failures include direct repair instructions:
+
+| Failure | Message or action |
+| --- | --- |
+| Service stopped | `Kessel isn't running. Start it with: kessel start` |
+| Wrong or missing key | Names `Authorization: Bearer` and `X-API-Key`; run `kessel key` |
+| Claude logged out | `Claude Code isn't logged in. Run: claude login` |
+| Codex logged out | `Codex isn't logged in. Run: codex login` |
+| Quota exhausted | Includes the local reset date and time when the provider reports it |
+
 Each provider has an independent concurrency semaphore. A request MAY wait for
 a provider slot without blocking the event loop or the other provider. If the
 configured wait expires, Kessel returns `429` with `Retry-After`. OpenAI routes
@@ -392,7 +468,7 @@ use error code `provider_busy`; `/v1/messages` uses Anthropic's
 
 | Environment variable | Default | Description |
 | --- | --- | --- |
-| `KESSEL_API_KEY` | Unset | Optional local API credential |
+| `KESSEL_API_KEY` | Saved config value | Override the generated local API credential |
 | `KESSEL_CORS_ORIGINS` | Local port 8000 origins | Comma-separated allowed origins |
 | `KESSEL_REQUEST_TIMEOUT_SECONDS` | `300` | Provider request timeout |
 | `KESSEL_MAX_CONCURRENT_REQUESTS` | `2` | Fallback limit for each provider |
@@ -403,14 +479,14 @@ use error code `provider_busy`; `/v1/messages` uses Anthropic's
 | `KESSEL_SHUTDOWN_GRACE_SECONDS` | `5` | Grace before active requests are cancelled |
 | `KESSEL_CODEX_COMMAND` | `codex` | Codex executable name or path |
 | `KESSEL_CLAUDE_COMMAND` | `claude` | Claude executable name or path |
-| `KESSEL_ENFORCE_CLI_VERSIONS` | `true` | Enforce tested CLI versions at startup |
+| `KESSEL_ENFORCE_CLI_VERSIONS` | `false` | Enforce the versions recorded in `Settings` |
 
 Example:
 
 ```powershell
 $env:KESSEL_API_KEY = "replace-with-a-local-secret"
 $env:KESSEL_CODEX_MAX_CONCURRENT_REQUESTS = "4"
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+kessel serve
 ```
 
 ## Security properties
@@ -477,20 +553,32 @@ Regenerate all benchmark artifacts against a running server:
 
 ## Development
 
-Run the complete test suite:
+Install a source checkout and run the complete test suite:
 
 ```powershell
+git clone https://github.com/waderylan/kessel.git
+cd kessel
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
+
+Use `kessel setup` for an end-to-end local test. Use `kessel serve` only when
+debugging the foreground Uvicorn process. The application must use one worker;
+multiple workers split process-local provider limits, quota observations, and
+the warm Codex App Server.
 
 Repository layout:
 
 ```text
 app/main.py                     HTTP routes and response streaming
+app/cli.py                      Setup, env, connect, and service commands
+app/service.py                  systemd, launchd, and Task Scheduler adapters
+app/user_config.py              Per-user key and listener configuration
 app/models.py                   OpenAI and Anthropic data models
 app/output_control.py           Token ceilings and stop-sequence matching
-app/providers/                  Provider commands, parsing, and warm Codex
+app/providers/                  Provider commands, health checks, parsing, and warm Codex
 app/runner.py                   Bounded asynchronous subprocess execution
 app/static/                     Dependency-free local web client
 benchmarks/                     Latency harness and generated results

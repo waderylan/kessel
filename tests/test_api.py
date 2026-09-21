@@ -11,7 +11,7 @@ from app.models import (
     ProviderStreamEvent,
     TokenUsage,
 )
-from app.runner import ProviderRateLimitError
+from app.runner import ProviderAuthenticationError, ProviderRateLimitError
 
 
 class FakeProvider:
@@ -151,6 +151,9 @@ async def test_configured_api_key_is_required() -> None:
     assert unauthorized.status_code == 401
     assert unauthorized.json()["error"]["type"] == "authentication_error"
     assert unauthorized.json()["error"]["code"] == "invalid_api_key"
+    assert "Authorization: Bearer" in unauthorized.json()["error"]["message"]
+    assert "X-API-Key" in unauthorized.json()["error"]["message"]
+    assert "Run kessel key to see yours" in unauthorized.json()["error"]["message"]
     assert authorized.status_code == 200
 
 
@@ -308,6 +311,30 @@ class RateLimitedRegistry(FakeRegistry):
         raise ProviderRateLimitError("quota exhausted", retry_after_seconds=45)
 
 
+class LoggedOutRegistry(FakeRegistry):
+    async def preflight(self, provider_name: str):
+        raise ProviderAuthenticationError(provider_name, "not logged in")
+
+
+@pytest.mark.asyncio
+async def test_logged_out_provider_has_exact_repair_command() -> None:
+    app = create_app(make_settings(), registry=LoggedOutRegistry())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/claude/chat/completions",
+            json={
+                "model": "default",
+                "messages": [{"role": "user", "content": "x"}],
+            },
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["message"] == (
+        "Claude Code isn't logged in. Run: claude login"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("path", "payload", "anthropic"),
@@ -336,6 +363,7 @@ async def test_rate_limit_is_a_real_429(
     assert response.headers["retry-after"] == "45"
     assert response.headers["ratelimit-remaining"] == "0"
     error = response.json()
+    assert "Quota resets at" in error["error"]["message"]
     if anthropic:
         assert error["error"]["type"] == "rate_limit_error"
     else:

@@ -3,9 +3,10 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kessel-local-api"
+name = "kessel-local"
 version = "0.1.0"
 description = "OpenAI-compatible local API for Codex and Claude Code subscriptions"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115,<1",
@@ -13,6 +14,13 @@ dependencies = [
     "tiktoken>=0.8,<1",
     "uvicorn[standard]>=0.30,<1",
 ]
+
+[project.scripts]
+kessel = "app.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/waderylan/kessel"
+Repository = "https://github.com/waderylan/kessel"
 
 [project.optional-dependencies]
 dev = [

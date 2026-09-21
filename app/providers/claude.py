@@ -165,6 +165,7 @@ class ClaudeProvider(ProviderAdapter):
                             raise provider_error_from_message(
                                 event.get("result") or "Claude reported an error",
                                 snapshot.retry_after_seconds if snapshot else None,
+                                provider=self.name,
                             )
                         model = event.get("modelUsage") or request.model
                         if isinstance(model, dict):
@@ -190,7 +191,8 @@ class ClaudeProvider(ProviderAdapter):
 
         if payload.get("is_error"):
             raise provider_error_from_message(
-                payload.get("result") or "Claude reported an error"
+                payload.get("result") or "Claude reported an error",
+                provider=self.name,
             )
         structured = payload.get("structured_output")
         text = (

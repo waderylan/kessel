@@ -39,6 +39,12 @@ class ProviderBusyError(ProviderRateLimitError):
     """Raised when a provider concurrency slot is unavailable."""
 
 
+class ProviderAuthenticationError(ProcessError):
+    def __init__(self, provider: str, message: str) -> None:
+        self.provider = provider
+        super().__init__(message)
+
+
 class ProcessExitError(ProcessError):
     def __init__(self, return_code: int, stderr: str) -> None:
         self.return_code = return_code
@@ -47,9 +53,23 @@ class ProcessExitError(ProcessError):
 
 
 def provider_error_from_message(
-    message: str, retry_after_seconds: int | None = None
+    message: str,
+    retry_after_seconds: int | None = None,
+    provider: str | None = None,
 ) -> ProcessError:
     normalized = message.lower()
+    if provider and any(
+        marker in normalized
+        for marker in (
+            "not logged in",
+            "not authenticated",
+            "authentication required",
+            "please login",
+            "please log in",
+            "run /login",
+        )
+    ):
+        return ProviderAuthenticationError(provider, message)
     if any(
         marker in normalized
         for marker in (

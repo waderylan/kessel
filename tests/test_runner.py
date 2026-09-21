@@ -4,7 +4,21 @@ from pathlib import Path
 
 import pytest
 
-from app.runner import ProcessNotFoundError, ProcessRunner
+from app.runner import (
+    ProcessNotFoundError,
+    ProcessRunner,
+    ProviderAuthenticationError,
+    provider_error_from_message,
+)
+
+
+def test_provider_login_error_is_classified() -> None:
+    error = provider_error_from_message(
+        "Not logged in. Please login", provider="claude"
+    )
+
+    assert isinstance(error, ProviderAuthenticationError)
+    assert error.provider == "claude"
 
 
 @pytest.mark.asyncio

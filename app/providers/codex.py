@@ -213,7 +213,8 @@ class CodexProvider(ProviderAdapter):
                             "error", {}
                         ).get("message")
                         raise provider_error_from_message(
-                            message or "Codex reported an error"
+                            message or "Codex reported an error",
+                            provider=self.name,
                         )
         finally:
             await asyncio.to_thread(temporary.cleanup)
@@ -247,7 +248,8 @@ class CodexProvider(ProviderAdapter):
                     "message"
                 )
                 raise provider_error_from_message(
-                    message or "Codex reported an error"
+                    message or "Codex reported an error",
+                    provider=self.name,
                 )
 
         if not final_text:
