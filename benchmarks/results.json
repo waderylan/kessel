@@ -1,0 +1,414 @@
+{
+  "samples": [
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "low",
+      "ttft_ms": 2710.67,
+      "total_ms": 3499.01,
+      "run": 1
+    },
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "low",
+      "ttft_ms": 2883.52,
+      "total_ms": 3463.79,
+      "run": 2
+    },
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "low",
+      "ttft_ms": 2734.64,
+      "total_ms": 3491.67,
+      "run": 3
+    },
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "medium",
+      "ttft_ms": 2782.1,
+      "total_ms": 3531.19,
+      "run": 1
+    },
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "medium",
+      "ttft_ms": 4603.81,
+      "total_ms": 5213.7,
+      "run": 2
+    },
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "medium",
+      "ttft_ms": 3012.82,
+      "total_ms": 4061.63,
+      "run": 3
+    },
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "high",
+      "ttft_ms": 3137.29,
+      "total_ms": 3715.51,
+      "run": 1
+    },
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "high",
+      "ttft_ms": 2809.78,
+      "total_ms": 3414.08,
+      "run": 2
+    },
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "high",
+      "ttft_ms": 4182.73,
+      "total_ms": 4855.24,
+      "run": 3
+    },
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "xhigh",
+      "ttft_ms": 4308.64,
+      "total_ms": 5025.43,
+      "run": 1
+    },
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "xhigh",
+      "ttft_ms": 2655.78,
+      "total_ms": 3246.74,
+      "run": 2
+    },
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "xhigh",
+      "ttft_ms": 2721.25,
+      "total_ms": 3318.22,
+      "run": 3
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "low",
+      "ttft_ms": 2317.12,
+      "total_ms": 2837.62,
+      "run": 1
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "low",
+      "ttft_ms": 2651.16,
+      "total_ms": 2814.34,
+      "run": 2
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "low",
+      "ttft_ms": 2485.73,
+      "total_ms": 2659.13,
+      "run": 3
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "medium",
+      "ttft_ms": 2080.72,
+      "total_ms": 2279.79,
+      "run": 1
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "medium",
+      "ttft_ms": 2208.5,
+      "total_ms": 2359.38,
+      "run": 2
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "medium",
+      "ttft_ms": 3441.74,
+      "total_ms": 3635.01,
+      "run": 3
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "high",
+      "ttft_ms": 2223.74,
+      "total_ms": 2399.43,
+      "run": 1
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "high",
+      "ttft_ms": 2361.84,
+      "total_ms": 2563.78,
+      "run": 2
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "high",
+      "ttft_ms": 2623.07,
+      "total_ms": 2801.3,
+      "run": 3
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "xhigh",
+      "ttft_ms": 2409.5,
+      "total_ms": 2577.49,
+      "run": 1
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "xhigh",
+      "ttft_ms": 3477.1,
+      "total_ms": 3599.03,
+      "run": 2
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "xhigh",
+      "ttft_ms": 2529.87,
+      "total_ms": 2719.01,
+      "run": 3
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "low",
+      "ttft_ms": 1502.8,
+      "total_ms": 1987.37,
+      "run": 1
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "low",
+      "ttft_ms": 1329.22,
+      "total_ms": 1803.95,
+      "run": 2
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "low",
+      "ttft_ms": 1366.55,
+      "total_ms": 1860.47,
+      "run": 3
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "medium",
+      "ttft_ms": 1435.76,
+      "total_ms": 1995.95,
+      "run": 1
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "medium",
+      "ttft_ms": 1702.65,
+      "total_ms": 2194.81,
+      "run": 2
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "medium",
+      "ttft_ms": 1399.07,
+      "total_ms": 1981.12,
+      "run": 3
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "high",
+      "ttft_ms": 1431.0,
+      "total_ms": 1983.11,
+      "run": 1
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "high",
+      "ttft_ms": 1409.21,
+      "total_ms": 1921.19,
+      "run": 2
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "high",
+      "ttft_ms": 1325.95,
+      "total_ms": 1899.35,
+      "run": 3
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "xhigh",
+      "ttft_ms": 1336.86,
+      "total_ms": 1830.72,
+      "run": 1
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "xhigh",
+      "ttft_ms": 1361.93,
+      "total_ms": 1960.77,
+      "run": 2
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "xhigh",
+      "ttft_ms": 1449.11,
+      "total_ms": 2010.95,
+      "run": 3
+    }
+  ],
+  "summary": [
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "low",
+      "runs": 3,
+      "ttft_p50_ms": 2734.6,
+      "ttft_p95_ms": 2883.5,
+      "total_p50_ms": 3491.7,
+      "total_p95_ms": 3499.0
+    },
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "medium",
+      "runs": 3,
+      "ttft_p50_ms": 3012.8,
+      "ttft_p95_ms": 4603.8,
+      "total_p50_ms": 4061.6,
+      "total_p95_ms": 5213.7
+    },
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "high",
+      "runs": 3,
+      "ttft_p50_ms": 3137.3,
+      "ttft_p95_ms": 4182.7,
+      "total_p50_ms": 3715.5,
+      "total_p95_ms": 4855.2
+    },
+    {
+      "provider": "codex",
+      "backend": "fresh",
+      "effort": "xhigh",
+      "runs": 3,
+      "ttft_p50_ms": 2721.2,
+      "ttft_p95_ms": 4308.6,
+      "total_p50_ms": 3318.2,
+      "total_p95_ms": 5025.4
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "low",
+      "runs": 3,
+      "ttft_p50_ms": 2485.7,
+      "ttft_p95_ms": 2651.2,
+      "total_p50_ms": 2814.3,
+      "total_p95_ms": 2837.6
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "medium",
+      "runs": 3,
+      "ttft_p50_ms": 2208.5,
+      "ttft_p95_ms": 3441.7,
+      "total_p50_ms": 2359.4,
+      "total_p95_ms": 3635.0
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "high",
+      "runs": 3,
+      "ttft_p50_ms": 2361.8,
+      "ttft_p95_ms": 2623.1,
+      "total_p50_ms": 2563.8,
+      "total_p95_ms": 2801.3
+    },
+    {
+      "provider": "codex",
+      "backend": "warm",
+      "effort": "xhigh",
+      "runs": 3,
+      "ttft_p50_ms": 2529.9,
+      "ttft_p95_ms": 3477.1,
+      "total_p50_ms": 2719.0,
+      "total_p95_ms": 3599.0
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "low",
+      "runs": 3,
+      "ttft_p50_ms": 1366.5,
+      "ttft_p95_ms": 1502.8,
+      "total_p50_ms": 1860.5,
+      "total_p95_ms": 1987.4
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "medium",
+      "runs": 3,
+      "ttft_p50_ms": 1435.8,
+      "ttft_p95_ms": 1702.7,
+      "total_p50_ms": 1996.0,
+      "total_p95_ms": 2194.8
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "high",
+      "runs": 3,
+      "ttft_p50_ms": 1409.2,
+      "ttft_p95_ms": 1431.0,
+      "total_p50_ms": 1921.2,
+      "total_p95_ms": 1983.1
+    },
+    {
+      "provider": "claude",
+      "backend": "fresh",
+      "effort": "xhigh",
+      "runs": 3,
+      "ttft_p50_ms": 1361.9,
+      "ttft_p95_ms": 1449.1,
+      "total_p50_ms": 1960.8,
+      "total_p95_ms": 2011.0
+    }
+  ]
+}

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Send stateless prompts through local Codex and Claude Code subscriptions."
+    />
+    <title>Kessel local API</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260920-model-select" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Kessel home">Kessel</a>
+      <div class="status" id="service-status" role="status" aria-live="polite">
+        Checking local providers
+      </div>
+      <a class="docs-link" href="/docs">API docs</a>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <p class="eyebrow">Local model gateway</p>
+        <h1 id="page-title">One request. Your local subscription.</h1>
+        <p>
+          Send a stateless chat completion through Codex or Claude Code. No API
+          key billing layer.
+        </p>
+      </section>
+
+      <section class="workspace" aria-label="Prompt workspace">
+        <form class="composer" id="prompt-form">
+          <fieldset>
+            <legend>Provider</legend>
+            <div class="provider-options">
+              <label>
+                <input type="radio" name="provider" value="codex" checked />
+                <span>Codex</span>
+              </label>
+              <label>
+                <input type="radio" name="provider" value="claude" />
+                <span>Claude Code</span>
+              </label>
+            </div>
+          </fieldset>
+
+          <div class="field">
+            <label for="model">Model</label>
+            <select
+              id="model"
+              name="model"
+              aria-describedby="model-help"
+              aria-busy="true"
+              disabled
+            >
+              <option value="default">Loading models...</option>
+            </select>
+            <p id="model-help" class="helper">
+              Loading models from the selected local login.
+            </p>
+          </div>
+
+          <div class="field">
+            <label for="reasoning-effort">Reasoning effort</label>
+            <select id="reasoning-effort" name="reasoning-effort">
+              <option value="low" selected>Low, fastest</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="xhigh">Extra high</option>
+            </select>
+            <p class="helper">Increase only for tasks that need deeper reasoning.</p>
+          </div>
+
+          <div class="field fast-tier-field" id="fast-tier-field">
+            <label class="checkbox-label" for="fast-tier">
+              <input id="fast-tier" name="fast-tier" type="checkbox" />
+              <span>Codex Fast mode</span>
+            </label>
+            <p class="helper">About 1.5x faster; uses 2.5x subscription credits.</p>
+          </div>
+
+          <div class="field warm-field" id="warm-field">
+            <label class="checkbox-label" for="warm-backend">
+              <input id="warm-backend" name="warm-backend" type="checkbox" />
+              <span>Warm Codex process</span>
+            </label>
+            <p class="helper">Uses a new ephemeral thread on a shared local server.</p>
+          </div>
+
+          <div class="field">
+            <label class="checkbox-label" for="stream-response">
+              <input
+                id="stream-response"
+                name="stream-response"
+                type="checkbox"
+                checked
+              />
+              <span>Stream response</span>
+            </label>
+            <p class="helper">Shows provider output as soon as it is available.</p>
+          </div>
+
+          <div class="field">
+            <label for="api-key">Local API key</label>
+            <input
+              id="api-key"
+              name="api-key"
+              type="password"
+              autocomplete="off"
+              aria-describedby="api-key-help"
+            />
+            <p id="api-key-help" class="helper">
+              Leave blank unless KESSEL_API_KEY is configured.
+            </p>
+          </div>
+
+          <div class="field prompt-field">
+            <label for="prompt">Request</label>
+            <textarea
+              id="prompt"
+              name="prompt"
+              rows="10"
+              maxlength="40000"
+              placeholder="Ask a question or paste code to review."
+              required
+            ></textarea>
+            <p class="error-text" id="form-error" aria-live="polite"></p>
+          </div>
+
+          <button class="submit-button" id="submit-button" type="submit">
+            Send request
+          </button>
+        </form>
+
+        <section class="output" aria-labelledby="output-title">
+          <div class="output-header">
+            <div>
+              <p class="output-label">Response</p>
+              <h2 id="output-title">Provider output</h2>
+            </div>
+            <button class="copy-button" id="copy-button" type="button" hidden>
+              Copy
+            </button>
+          </div>
+
+          <div class="output-body" id="output-body" aria-live="polite">
+            <div class="empty-state" id="empty-state">
+              <p>Output will appear here after the provider process exits.</p>
+            </div>
+            <div class="loading-state" id="loading-state" hidden>
+              <div class="skeleton skeleton-wide"></div>
+              <div class="skeleton"></div>
+              <div class="skeleton skeleton-short"></div>
+              <p>Waiting for provider output</p>
+            </div>
+            <div class="response-state" id="response-state" hidden>
+              <pre id="response-text"></pre>
+              <p class="response-meta" id="response-meta"></p>
+            </div>
+            <div class="error-state" id="error-state" hidden>
+              <h3>Request failed</h3>
+              <p id="request-error"></p>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="endpoint-note" aria-labelledby="endpoint-title">
+        <div>
+          <h2 id="endpoint-title">OpenAI client setup</h2>
+          <p>Set the base URL once, then use the standard chat completions call.</p>
+        </div>
+        <code id="endpoint-code">http://127.0.0.1:8000/v1/codex</code>
+      </section>
+    </main>
+
+    <footer>
+      <p>Local only by default. Requests are not stored by Kessel.</p>
+    </footer>
+
+    <script src="/static/app.js?v=20260920-model-select" defer></script>
+  </body>
+</html>

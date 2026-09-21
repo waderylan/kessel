@@ -1,0 +1,104 @@
+import asyncio
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from app.models import ChatCompletionRequest
+from app.output_control import control_output_stream
+from app.providers.codex_app_server import CodexAppServer
+
+
+class FakeAppServer(CodexAppServer):
+    def __init__(self, instructions_path: Path) -> None:
+        super().__init__("codex", 2, instructions_path, ())
+        self.calls: list[tuple[str, dict]] = []
+        self._runtime_directory = tempfile.TemporaryDirectory(
+            prefix="kessel-test-app-server-"
+        )
+
+    async def start(self) -> None:
+        return None
+
+    async def _request(self, method: str, params: dict) -> dict:
+        self.calls.append((method, params))
+        if method == "thread/start":
+            return {"thread": {"id": "thread-1"}}
+        if method == "turn/start":
+            asyncio.get_running_loop().call_soon(
+                self._thread_queues["thread-1"].put_nowait,
+                {
+                    "method": "item/agentMessage/delta",
+                    "params": {"threadId": "thread-1", "delta": "hello"},
+                },
+            )
+            return {"turn": {"id": "turn-1"}}
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_closing_warm_stream_interrupts_turn(tmp_path: Path) -> None:
+    instructions = tmp_path / "instructions.txt"
+    instructions.write_text("test", encoding="utf-8")
+    server = FakeAppServer(instructions)
+    request = ChatCompletionRequest(
+        model="default",
+        backend="warm",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    stream = server.stream(request, "hello", tmp_path, None)
+
+    event = await anext(stream)
+    assert event.delta == "hello"
+    await stream.aclose()
+
+    assert (
+        "turn/interrupt",
+        {"threadId": "thread-1", "turnId": "turn-1"},
+    ) in server.calls
+    server._runtime_directory.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_interrupts_warm_turn(tmp_path: Path) -> None:
+    instructions = tmp_path / "instructions.txt"
+    instructions.write_text("test", encoding="utf-8")
+    server = FakeAppServer(instructions)
+    request = ChatCompletionRequest(
+        model="default",
+        backend="warm",
+        max_tokens=1,
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    stream = control_output_stream(
+        server.stream(request, "hello", tmp_path, None),
+        requested_model="default",
+        max_tokens=1,
+        stop_sequences=(),
+    )
+
+    events = [event async for event in stream]
+
+    assert "".join(event.delta for event in events) == "hello"
+    assert events[-1].result is not None
+    assert events[-1].result.finish_reason == "length"
+    assert (
+        "turn/interrupt",
+        {"threadId": "thread-1", "turnId": "turn-1"},
+    ) in server.calls
+    server._runtime_directory.cleanup()
+
+
+def test_rate_limit_snapshot_uses_most_consumed_window() -> None:
+    snapshot = CodexAppServer._parse_rate_limit(
+        {
+            "limitId": "codex",
+            "primary": {"usedPercent": 25, "resetsAt": 100},
+            "secondary": {"usedPercent": 80, "resetsAt": 200},
+            "rateLimitReachedType": None,
+        }
+    )
+
+    assert snapshot is not None
+    assert snapshot.remaining_percent == 20
+    assert snapshot.resets_at == 200

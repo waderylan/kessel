@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="430" viewBox="0 0 1100 430">
+<rect width="100%" height="100%" fill="#f4f6f4"/>
+<style>text{font-family:Segoe UI,sans-serif;fill:#18201b}.label{font-size:11px}.value{font-size:10px}</style>
+<line x1="70" y1="330" x2="1080" y2="330" stroke="#58645c"/>
+<rect x="85" y="129.1" width="58" height="200.9" rx="4" fill="#6b8f7a"/>
+<text class="value" x="114.0" y="124.1" text-anchor="middle">3492</text>
+<text class="label" transform="translate(97,342) rotate(55)">codex fresh low</text>
+<rect x="165" y="96.3" width="58" height="233.7" rx="4" fill="#6b8f7a"/>
+<text class="value" x="194.0" y="91.3" text-anchor="middle">4062</text>
+<text class="label" transform="translate(177,342) rotate(55)">codex fresh medium</text>
+<rect x="245" y="116.2" width="58" height="213.8" rx="4" fill="#6b8f7a"/>
+<text class="value" x="274.0" y="111.2" text-anchor="middle">3716</text>
+<text class="label" transform="translate(257,342) rotate(55)">codex fresh high</text>
+<rect x="325" y="139.1" width="58" height="190.9" rx="4" fill="#6b8f7a"/>
+<text class="value" x="354.0" y="134.1" text-anchor="middle">3318</text>
+<text class="label" transform="translate(337,342) rotate(55)">codex fresh xhigh</text>
+<rect x="405" y="168.1" width="58" height="161.9" rx="4" fill="#146b45"/>
+<text class="value" x="434.0" y="163.1" text-anchor="middle">2814</text>
+<text class="label" transform="translate(417,342) rotate(55)">codex warm low</text>
+<rect x="485" y="194.2" width="58" height="135.8" rx="4" fill="#146b45"/>
+<text class="value" x="514.0" y="189.2" text-anchor="middle">2359</text>
+<text class="label" transform="translate(497,342) rotate(55)">codex warm medium</text>
+<rect x="565" y="182.5" width="58" height="147.5" rx="4" fill="#146b45"/>
+<text class="value" x="594.0" y="177.5" text-anchor="middle">2564</text>
+<text class="label" transform="translate(577,342) rotate(55)">codex warm high</text>
+<rect x="645" y="173.5" width="58" height="156.5" rx="4" fill="#146b45"/>
+<text class="value" x="674.0" y="168.5" text-anchor="middle">2719</text>
+<text class="label" transform="translate(657,342) rotate(55)">codex warm xhigh</text>
+<rect x="725" y="222.9" width="58" height="107.1" rx="4" fill="#6b8f7a"/>
+<text class="value" x="754.0" y="217.9" text-anchor="middle">1860</text>
+<text class="label" transform="translate(737,342) rotate(55)">claude fresh low</text>
+<rect x="805" y="215.1" width="58" height="114.9" rx="4" fill="#6b8f7a"/>
+<text class="value" x="834.0" y="210.1" text-anchor="middle">1996</text>
+<text class="label" transform="translate(817,342) rotate(55)">claude fresh medium</text>
+<rect x="885" y="219.5" width="58" height="110.5" rx="4" fill="#6b8f7a"/>
+<text class="value" x="914.0" y="214.5" text-anchor="middle">1921</text>
+<text class="label" transform="translate(897,342) rotate(55)">claude fresh high</text>
+<rect x="965" y="217.2" width="58" height="112.8" rx="4" fill="#6b8f7a"/>
+<text class="value" x="994.0" y="212.2" text-anchor="middle">1961</text>
+<text class="label" transform="translate(977,342) rotate(55)">claude fresh xhigh</text>
+<text x="16" y="20" font-size="13">Median end-to-end latency (ms)</text>
+</svg>
