@@ -1,0 +1,5 @@
+/build/
+/benchmark-results/*-config/
+/benchmark-results/*-state/
+/test-state/
+*.log

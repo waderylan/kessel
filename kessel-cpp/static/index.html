@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Send stateless prompts through local Codex and Claude Code subscriptions." />
+    <title>Kessel local API</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header><a href="/">Kessel</a><span id="status" role="status">Checking providers</span><a href="/docs">API docs</a></header>
+    <main>
+      <section class="intro"><p class="eyebrow">Local model gateway</p><h1>One request. Your local subscription.</h1><p>Send a stateless chat completion through Codex or Claude Code. No API key billing layer.</p></section>
+      <section class="workspace" aria-label="Prompt workspace">
+        <form id="prompt-form">
+          <fieldset><legend>Provider</legend><label><input type="radio" name="provider" value="codex" checked /> Codex</label><label><input type="radio" name="provider" value="claude" /> Claude Code</label></fieldset>
+          <label for="model">Model</label><select id="model"><option value="default">Default</option></select>
+          <label for="effort">Reasoning effort</label><select id="effort"><option value="low">Low, fastest</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option></select>
+          <label id="fast-label"><input id="fast" type="checkbox" /> Codex Fast mode</label>
+          <label id="warm-label"><input id="warm" type="checkbox" /> Warm Codex process</label>
+          <label><input id="stream" type="checkbox" checked /> Stream response</label>
+          <label for="api-key">Local API key</label><input id="api-key" type="password" autocomplete="off" />
+          <label for="prompt">Request</label><textarea id="prompt" rows="10" maxlength="40000" required></textarea>
+          <p class="error" id="form-error" aria-live="polite"></p><button id="submit" type="submit">Send request</button>
+        </form>
+        <section class="output" aria-labelledby="output-title"><div class="output-heading"><h2 id="output-title">Provider output</h2><button id="copy" class="secondary" type="button" hidden>Copy</button></div><p id="empty">Output will appear here after a request.</p><p id="loading" hidden>Waiting for provider output</p><pre id="response" hidden aria-live="polite"></pre><p id="response-meta" class="meta" hidden></p><p id="request-error" class="error" hidden></p></section>
+      </section>
+      <section class="endpoint"><div><h2>OpenAI client setup</h2><p>Use this base URL with a standard chat-completions client.</p></div><code id="endpoint">http://127.0.0.1:8000/v1/codex</code></section>
+    </main>
+    <footer>Local only by default. Requests are not stored by Kessel.</footer>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

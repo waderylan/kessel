@@ -1,0 +1,17 @@
+{
+    "measured_at":  "2026-09-21T13:38:34.5651980-07:00",
+    "workload":  "sequential OpenAI-compatible requests through a fresh mock provider process",
+    "python":  {
+                   "runs":  100,
+                   "mean_ms":  27.816,
+                   "p50_ms":  27.551,
+                   "p95_ms":  29.835
+               },
+    "cpp":  {
+                "runs":  100,
+                "mean_ms":  17.225,
+                "p50_ms":  16.948,
+                "p95_ms":  18.645
+            },
+    "cpp_mean_latency_reduction_percent":  38.1
+}
