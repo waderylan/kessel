@@ -6,11 +6,20 @@ import argparse
 import csv
 import json
 import math
+import os
 import statistics
+import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from app.user_config import UserConfig
 
 
 EFFORTS = ("low", "medium", "high", "xhigh")
@@ -28,7 +37,13 @@ def percentile(values: list[float], probability: float) -> float:
     return ordered[index]
 
 
-def run_once(base_url: str, provider: str, backend: str, effort: str) -> dict:
+def run_once(
+    base_url: str,
+    provider: str,
+    backend: str,
+    effort: str,
+    api_key: str,
+) -> dict:
     payload = json.dumps(
         {
             "model": "default",
@@ -41,7 +56,10 @@ def run_once(base_url: str, provider: str, backend: str, effort: str) -> dict:
     request = urllib.request.Request(
         f"{base_url}/v1/{provider}/chat/completions",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
         method="POST",
     )
     started = time.perf_counter()
@@ -174,19 +192,28 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).parent)
+    parser.add_argument(
+        "--api-key",
+        help="Kessel API key; defaults to KESSEL_API_KEY or the saved config",
+    )
     args = parser.parse_args()
     if args.runs < 1:
         parser.error("--runs must be at least 1")
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    api_key = args.api_key or os.getenv("KESSEL_API_KEY") or UserConfig.load().api_key
+    if not api_key:
+        parser.error("no Kessel API key found; run kessel setup or pass --api-key")
 
     # Start the persistent server before measured warm samples.
-    run_once(args.base_url, "codex", "warm", "low")
+    run_once(args.base_url, "codex", "warm", "low", api_key)
 
     samples = []
     for provider, backend in CASES:
         for effort in EFFORTS:
             for run_number in range(1, args.runs + 1):
-                sample = run_once(args.base_url, provider, backend, effort)
+                sample = run_once(
+                    args.base_url, provider, backend, effort, api_key
+                )
                 sample["run"] = run_number
                 samples.append(sample)
                 print(

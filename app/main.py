@@ -6,12 +6,13 @@ import asyncio
 import hashlib
 import json
 import logging
-import shutil
 import secrets
+import shutil
+import threading
 import time
 import uuid
-from datetime import datetime
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -53,6 +54,79 @@ from app.user_config import UserConfig
 STATIC_DIRECTORY = Path(__file__).parent / "static"
 REQUEST_LOGGER = logging.getLogger("uvicorn.error")
 REQUEST_LOGGER.setLevel(logging.INFO)
+HEALTH_CACHE_TTL_SECONDS = 5.0
+
+
+class ConfigApiKeyCache:
+    """Cache the file-backed API key until the atomic config file changes."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._loaded = False
+        self._path: Path | None = None
+        self._signature: tuple[int, int, int, int] | None = None
+        self._key: str | None = None
+
+    def get(self) -> str | None:
+        path = UserConfig().path
+        with self._lock:
+            try:
+                stat = path.stat()
+                signature: tuple[int, int, int, int] | None = (
+                    stat.st_mtime_ns,
+                    stat.st_ctime_ns,
+                    stat.st_size,
+                    stat.st_ino,
+                )
+            except FileNotFoundError:
+                signature = None
+            except OSError as exc:
+                raise ValueError(
+                    f"Could not inspect Kessel config at {path}: {exc}"
+                ) from exc
+            if (
+                not self._loaded
+                or path != self._path
+                or signature != self._signature
+            ):
+                key = UserConfig.load().api_key
+                self._loaded = True
+                self._path = path
+                self._signature = signature
+                self._key = key
+            return self._key
+
+
+class ProviderAvailabilityCache:
+    """Cache provider PATH resolution for a short, refreshable interval."""
+
+    def __init__(self, ttl_seconds: float = HEALTH_CACHE_TTL_SECONDS) -> None:
+        self._ttl_seconds = ttl_seconds
+        self._expires_at = 0.0
+        self._commands: tuple[tuple[str, str], ...] = ()
+        self._status: dict[str, dict[str, bool]] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(
+        self, commands: tuple[tuple[str, str], ...]
+    ) -> dict[str, dict[str, bool]]:
+        now = time.monotonic()
+        if commands == self._commands and now < self._expires_at:
+            return self._status
+        async with self._lock:
+            now = time.monotonic()
+            if commands == self._commands and now < self._expires_at:
+                return self._status
+            executables = await asyncio.gather(
+                *(asyncio.to_thread(shutil.which, command) for _, command in commands)
+            )
+            self._commands = commands
+            self._status = {
+                name: {"available": executable is not None}
+                for (name, _), executable in zip(commands, executables, strict=True)
+            }
+            self._expires_at = now + self._ttl_seconds
+            return self._status
 
 
 def create_registry(app_settings: Settings) -> ProviderRegistry:
@@ -101,6 +175,8 @@ def create_app(
     application.state.settings = app_settings
     application.state.registry = registry or create_registry(app_settings)
     application.state.cli_versions = {}
+    application.state.api_key_cache = ConfigApiKeyCache()
+    application.state.provider_availability_cache = ProviderAvailabilityCache()
 
     if app_settings.cors_origins:
         application.add_middleware(
@@ -292,7 +368,9 @@ def create_app(
         expected_key = application.state.settings.api_key
         if application.state.settings.reload_api_key_from_config:
             try:
-                expected_key = (await asyncio.to_thread(UserConfig.load)).api_key
+                expected_key = await asyncio.to_thread(
+                    application.state.api_key_cache.get
+                )
             except ValueError as exc:
                 raise HTTPException(
                     status_code=503,
@@ -504,13 +582,13 @@ def create_app(
 
     @application.get("/health")
     async def health() -> dict[str, object]:
-        provider_status = {}
-        for name in application.state.registry.names:
-            command = application.state.registry.get(name).command
-            executable = await asyncio.to_thread(shutil.which, command)
-            provider_status[name] = {
-                "available": executable is not None,
-            }
+        commands = tuple(
+            (name, application.state.registry.get(name).command)
+            for name in application.state.registry.names
+        )
+        provider_status = await application.state.provider_availability_cache.get(
+            commands
+        )
         return {"status": "ok", "providers": provider_status}
 
     def unsupported_parameter(parameter: str, reason: str) -> None:
@@ -524,6 +602,11 @@ def create_app(
         )
 
     def validate_chat_surface(body: ChatCompletionRequest) -> None:
+        if body.parallel_tool_calls:
+            unsupported_parameter(
+                "parallel_tool_calls",
+                "parallel function calls are not supported",
+            )
         stop_sequences = chat_stop_sequences(body)
         structured_response = (
             body.response_format is not None

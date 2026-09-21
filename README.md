@@ -234,6 +234,38 @@ Controlled overrides are documented in the application settings and include `KES
 
 See [AUDIT.md](AUDIT.md) for the full threat model and verified controls.
 
+## Benchmarks
+
+The live-provider benchmark loads the saved Kessel API key by default:
+
+```powershell
+python benchmarks/run.py --runs 5
+```
+
+Use the deterministic suite when measuring gateway, health-check, or process
+launch changes without model and network variance:
+
+```powershell
+python benchmarks/local_overhead.py --runs 100
+```
+
+<!-- benchmark-table:start -->
+| Provider | Backend | Effort | Runs | TTFT p50 | TTFT p95 | Total p50 | Total p95 |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| codex | fresh | low | 3 | 2735 ms | 2884 ms | 3492 ms | 3499 ms |
+| codex | fresh | medium | 3 | 3013 ms | 4604 ms | 4062 ms | 5214 ms |
+| codex | fresh | high | 3 | 3137 ms | 4183 ms | 3716 ms | 4855 ms |
+| codex | fresh | xhigh | 3 | 2721 ms | 4309 ms | 3318 ms | 5025 ms |
+| codex | warm | low | 3 | 2486 ms | 2651 ms | 2814 ms | 2838 ms |
+| codex | warm | medium | 3 | 2208 ms | 3442 ms | 2359 ms | 3635 ms |
+| codex | warm | high | 3 | 2362 ms | 2623 ms | 2564 ms | 2801 ms |
+| codex | warm | xhigh | 3 | 2530 ms | 3477 ms | 2719 ms | 3599 ms |
+| claude | fresh | low | 3 | 1366 ms | 1503 ms | 1860 ms | 1987 ms |
+| claude | fresh | medium | 3 | 1436 ms | 1703 ms | 1996 ms | 2195 ms |
+| claude | fresh | high | 3 | 1409 ms | 1431 ms | 1921 ms | 1983 ms |
+| claude | fresh | xhigh | 3 | 1362 ms | 1449 ms | 1961 ms | 2011 ms |
+<!-- benchmark-table:end -->
+
 ## Development
 
 ```powershell

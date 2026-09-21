@@ -4,25 +4,32 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
-
-import tiktoken
+from functools import lru_cache
+from typing import Any
 
 from app.models import ProviderResult, ProviderStreamEvent, TokenUsage
 
 
-_ENCODING = tiktoken.get_encoding("o200k_base")
+@lru_cache(maxsize=1)
+def _encoding() -> Any:
+    """Load the exact tokenizer only when an output limit needs it."""
+
+    import tiktoken
+
+    return tiktoken.get_encoding("o200k_base")
 
 
 def estimate_tokens(text: str) -> int:
     """Estimate provider-independent output tokens with o200k_base."""
 
-    return len(_ENCODING.encode(text))
+    return len(_encoding().encode(text))
 
 
 def _decode_token_prefix(text: str, token_limit: int) -> str:
-    token_ids = _ENCODING.encode(text)
+    encoding = _encoding()
+    token_ids = encoding.encode(text)
     prefix_bytes = b"".join(
-        _ENCODING.decode_single_token_bytes(token_id)
+        encoding.decode_single_token_bytes(token_id)
         for token_id in token_ids[:token_limit]
     )
     try:

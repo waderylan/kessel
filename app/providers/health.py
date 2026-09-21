@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from app.user_config import UserConfig
 
 
 @dataclass(frozen=True)
@@ -53,7 +56,10 @@ def _resolve_executable(command: str) -> str | None:
     if executable is None:
         return None
     shim = Path(executable)
-    if command != "codex" or shim.suffix.lower() not in {".cmd", ".bat"}:
+    if (
+        shim.stem.lower() != "codex"
+        or shim.suffix.lower() not in {".cmd", ".bat"}
+    ):
         return executable
 
     package_root = (
@@ -112,7 +118,20 @@ def _check_provider(
 def check_providers() -> list[ProviderHealth]:
     """Return deterministic checks for both supported local CLIs."""
 
+    config = UserConfig.load()
+    claude_command = (
+        os.getenv("KESSEL_CLAUDE_COMMAND")
+        or config.claude_command
+        or "claude"
+    )
+    codex_command = (
+        os.getenv("KESSEL_CODEX_COMMAND") or config.codex_command or "codex"
+    )
     return [
-        _check_provider("claude", "Claude Code", "claude", ["auth", "status"]),
-        _check_provider("codex", "Codex", "codex", ["login", "status"]),
+        _check_provider(
+            "claude", "Claude Code", claude_command, ["auth", "status"]
+        ),
+        _check_provider(
+            "codex", "Codex", codex_command, ["login", "status"]
+        ),
     ]

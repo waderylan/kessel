@@ -253,7 +253,7 @@ async def test_warm_claude_is_rejected_to_preserve_statelessness() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("n", 2)],
+    [("n", 2), ("parallel_tool_calls", True)],
 )
 async def test_unsupported_openai_controls_return_clear_400(
     field: str, value: object
@@ -273,6 +273,50 @@ async def test_unsupported_openai_controls_return_clear_400(
     assert response.status_code == 400
     assert response.json()["error"]["param"] == field
     assert response.json()["error"]["code"] == "unsupported_parameter"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [True, "1", 1.0])
+async def test_n_requires_a_strict_json_integer(value: object) -> None:
+    app = create_app(make_settings(), registry=FakeRegistry())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8000"
+    ) as client:
+        response = await client.post(
+            "/v1/codex/chat/completions",
+            json={
+                "model": "default",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "n": value,
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == "n"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_named_tool_must_match_supplied_tool() -> None:
+    app = create_app(make_settings(), registry=FakeRegistry())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8000"
+    ) as client:
+        response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "default",
+                "messages": [{"role": "user", "content": "Weather"}],
+                "tools": [
+                    {"name": "weather", "input_schema": {"type": "object"}}
+                ],
+                "tool_choice": {"type": "tool", "name": "missing"},
+            },
+        )
+
+    assert response.status_code == 400
+    assert "must match the supplied tool" in response.json()["error"]["message"]
 
 
 @pytest.mark.asyncio

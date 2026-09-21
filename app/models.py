@@ -126,7 +126,7 @@ class ChatCompletionRequest(BaseModel):
     stop: str | list[str] | None = None
     max_tokens: PositiveStrictInt | None = None
     max_completion_tokens: PositiveStrictInt | None = None
-    n: int = Field(default=1, gt=0)
+    n: PositiveStrictInt = 1
 
     @field_validator("messages")
     @classmethod
@@ -299,6 +299,19 @@ class AnthropicMessagesRequest(BaseModel):
         if any(not sequence for sequence in value):
             raise ValueError("stop sequences must not be empty")
         return value
+
+    @model_validator(mode="after")
+    def validate_named_tool_choice(self) -> "AnthropicMessagesRequest":
+        if self.tool_choice is None or self.tool_choice.type != "tool":
+            return self
+        selected_name = self.tool_choice.name
+        if (
+            selected_name is None
+            or len(self.tools) != 1
+            or self.tools[0].name != selected_name
+        ):
+            raise ValueError("tool_choice name must match the supplied tool")
+        return self
 
     def to_chat_request(self) -> ChatCompletionRequest:
         messages: list[ChatMessage] = []

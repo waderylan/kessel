@@ -1,0 +1,22 @@
+{
+  "workloads": {
+    "health_asgi": {
+      "runs": 100,
+      "mean_ms": 1.059,
+      "p50_ms": 1.052,
+      "p95_ms": 1.115
+    },
+    "gateway_asgi": {
+      "runs": 100,
+      "mean_ms": 1.802,
+      "p50_ms": 1.765,
+      "p95_ms": 1.984
+    },
+    "process_launch": {
+      "runs": 100,
+      "mean_ms": 72.883,
+      "p50_ms": 72.167,
+      "p95_ms": 77.983
+    }
+  }
+}

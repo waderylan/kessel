@@ -218,6 +218,78 @@ async def test_authentication_fails_closed_and_rotation_is_immediate(
 
 
 @pytest.mark.asyncio
+async def test_file_backed_api_key_parsing_is_cached_until_rotation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("KESSEL_CONFIG_DIR", str(tmp_path / "config"))
+    config = UserConfig(api_key="old-key")
+    config.save()
+    original_load = UserConfig.load.__func__
+    load_calls = 0
+
+    def tracked_load(cls):
+        nonlocal load_calls
+        load_calls += 1
+        return original_load(cls)
+
+    monkeypatch.setattr(UserConfig, "load", classmethod(tracked_load))
+    app = create_app(
+        settings(api_key="old-key", reload_api_key_from_config=True),
+        registry=SecurityRegistry(),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://127.0.0.1:8000",
+    ) as client:
+        first = await client.get(
+            "/v1/claude/models", headers={"authorization": "Bearer old-key"}
+        )
+        second = await client.get(
+            "/v1/claude/models", headers={"authorization": "Bearer old-key"}
+        )
+        rotated = config.with_rotated_key()
+        rotated.save()
+        third = await client.get(
+            "/v1/claude/models",
+            headers={"authorization": f"Bearer {rotated.api_key}"},
+        )
+        malformed = config.path.with_name(".malformed-config.tmp")
+        malformed.write_text("{", encoding="utf-8")
+        malformed.replace(config.path)
+        invalid = await client.get(
+            "/v1/claude/models",
+            headers={"authorization": f"Bearer {rotated.api_key}"},
+        )
+
+    assert first.status_code == second.status_code == third.status_code == 200
+    assert invalid.status_code == 503
+    assert load_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_health_provider_resolution_uses_short_ttl_cache(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_which(command: str) -> str:
+        calls.append(command)
+        return f"/resolved/{command}"
+
+    monkeypatch.setattr("app.main.shutil.which", fake_which)
+    app = create_app(settings(), registry=SecurityRegistry())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://127.0.0.1:8000",
+    ) as client:
+        first = await client.get("/health")
+        second = await client.get("/health")
+        app.state.provider_availability_cache._expires_at = 0
+        third = await client.get("/health")
+
+    assert first.status_code == second.status_code == third.status_code == 200
+    assert calls == ["provider-secret-path", "provider-secret-path"] * 2
+
+
+@pytest.mark.asyncio
 async def test_health_and_provider_errors_do_not_leak_details() -> None:
     secret = "SECRET_FROM_PROVIDER_STDERR"
     app = create_app(

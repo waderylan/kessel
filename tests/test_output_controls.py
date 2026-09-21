@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import httpx
@@ -19,6 +20,7 @@ from app.models import (
     ToolCall,
 )
 from app.output_control import control_output_stream
+from app import output_control
 from app.runner import ProcessRunner
 
 
@@ -107,6 +109,27 @@ def anthropic_stream_payloads(response: httpx.Response) -> list[dict]:
         for line in response.text.splitlines()
         if line.startswith("data: {")
     ]
+
+
+def test_tokenizer_encoding_is_initialized_lazily_and_cached(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeEncoding:
+        def encode(self, text: str) -> list[int]:
+            return list(range(len(text.split())))
+
+    fake_module = SimpleNamespace(
+        get_encoding=lambda name: (calls.append(name), FakeEncoding())[1]
+    )
+    output_control._encoding.cache_clear()
+    monkeypatch.setitem(sys.modules, "tiktoken", fake_module)
+    try:
+        assert calls == []
+        assert output_control.estimate_tokens("one two") == 2
+        assert output_control.estimate_tokens("three") == 1
+        assert calls == ["o200k_base"]
+    finally:
+        output_control._encoding.cache_clear()
 
 
 @pytest.mark.asyncio
