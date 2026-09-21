@@ -29,6 +29,18 @@ from app.structured import output_schema
 
 class ClaudeProvider(ProviderAdapter):
     name = "claude"
+    MODEL_ALIASES = {"sonnet", "opus", "haiku", "fable", "mythos"}
+
+    def accepts_model(self, model: str) -> bool:
+        return super().accepts_model(model) or model in self.MODEL_ALIASES
+
+    def environment_overrides(
+        self, request: ChatCompletionRequest
+    ) -> dict[str, str]:
+        overrides = {"CLAUDE_CODE_EFFORT_LEVEL": request.reasoning_effort}
+        if not uses_default_model(self.name, request.model):
+            overrides["ANTHROPIC_MODEL"] = request.model
+        return overrides
 
     async def complete(self, request: ChatCompletionRequest) -> ProviderResult:
         if output_schema(request) is not None:
@@ -67,8 +79,6 @@ class ClaudeProvider(ProviderAdapter):
             "none",
             "--safe-mode",
             "--restricted",
-            "--effort",
-            request.reasoning_effort,
             "--tools",
             "",
             "--system-prompt",
@@ -77,13 +87,6 @@ class ClaudeProvider(ProviderAdapter):
                 "conversation directly and concisely. Do not use tools."
             ),
         ]
-        if not uses_default_model(self.name, request.model):
-            command.extend(["--model", request.model])
-        schema = output_schema(request)
-        if schema is not None:
-            command.extend(
-                ["--json-schema", json.dumps(schema, separators=(",", ":"))]
-            )
         command.append("-")
         return command
 
@@ -109,7 +112,12 @@ class ClaudeProvider(ProviderAdapter):
                 "--verbose",
                 "--include-partial-messages",
             ]
-            line_stream = self.runner.stream_lines(command, prompt, cwd)
+            line_stream = self.runner.stream_lines(
+                command,
+                prompt,
+                cwd,
+                self.environment_overrides(request),
+            )
             async with aclosing(line_stream):
                 async for line in line_stream:
                     if not line.strip():

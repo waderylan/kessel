@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import time
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
@@ -18,11 +19,13 @@ from app.models import (
     ProviderStreamEvent,
     TokenUsage,
 )
+from app.process_security import ProcessGroupGuard, child_environment
 from app.providers.base import uses_default_model
 from app.rate_limits import RateLimitSnapshot
 from app.runner import (
     ProcessError,
     ProcessNotFoundError,
+    ProcessOutputLimitError,
     ProcessTimeoutError,
     provider_error_from_message,
 )
@@ -37,15 +40,18 @@ class CodexAppServer:
         timeout_seconds: int,
         instructions_path: Path,
         disabled_features: Sequence[str],
+        max_output_bytes: int = 1_048_576,
     ) -> None:
         self.command = command
         self.timeout_seconds = timeout_seconds
+        self.max_output_bytes = max_output_bytes
         self.instructions_path = instructions_path
         self.disabled_features = tuple(disabled_features)
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
         self._restart_task: asyncio.Task | None = None
+        self._process_guard: ProcessGroupGuard | None = None
         self._start_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._next_id = 1
@@ -89,9 +95,7 @@ class CodexAppServer:
                 self._instructions_text,
             ) = await asyncio.to_thread(self._prepare_runtime)
             command = self._build_command(executable)
-            env = os.environ.copy()
-            env["NO_COLOR"] = "1"
-            env["CODEX_HOME"] = str(isolated_home)
+            env = child_environment({"CODEX_HOME": str(isolated_home)})
             process_options: dict[str, object] = {}
             if os.name == "nt":
                 process_options["creationflags"] = (
@@ -102,23 +106,25 @@ class CodexAppServer:
 
             self._generation += 1
             generation = self._generation
-            self._process = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=str(runtime_path),
-                env=env,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **process_options,
-            )
-            process = self._process
-            self._reader_task = asyncio.create_task(
-                self._read_stdout(process, generation)
-            )
-            self._stderr_task = asyncio.create_task(
-                self._read_stderr(process)
-            )
+            process: asyncio.subprocess.Process | None = None
             try:
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    cwd=str(runtime_path),
+                    env=env,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    **process_options,
+                )
+                self._process = process
+                self._process_guard = ProcessGroupGuard.attach(process)
+                self._reader_task = asyncio.create_task(
+                    self._read_stdout(process, generation)
+                )
+                self._stderr_task = asyncio.create_task(
+                    self._read_stderr(process)
+                )
                 await self._request(
                     "initialize",
                     {
@@ -131,7 +137,22 @@ class CodexAppServer:
                 )
                 await self._notify("initialized", {})
             except BaseException:
-                await self._stop_process(process)
+                self._generation += 1
+                if process is not None:
+                    await self._stop_process(process)
+                tasks = [
+                    task
+                    for task in (self._reader_task, self._stderr_task)
+                    if task is not None and task is not asyncio.current_task()
+                ]
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                self._process = None
+                self._reader_task = None
+                self._stderr_task = None
+                await self._cleanup_runtime()
                 raise
 
     async def close(self) -> None:
@@ -199,7 +220,7 @@ class CodexAppServer:
                 "Codex App Server returned no thread id"
             ) from exc
 
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1024)
         self._thread_queues[thread_id] = queue
         turn_params: dict[str, object] = {
             "threadId": thread_id,
@@ -244,6 +265,10 @@ class CodexAppServer:
                     delta = params.get("delta", "")
                     if isinstance(delta, str) and delta:
                         full_text += delta
+                        if len(full_text.encode("utf-8")) > self.max_output_bytes:
+                            raise ProcessOutputLimitError(
+                                f"provider output exceeded {self.max_output_bytes} bytes"
+                            )
                         yield ProviderStreamEvent(delta=delta)
                 elif method == "item/completed":
                     item = params.get("item", {})
@@ -251,6 +276,10 @@ class CodexAppServer:
                         text = item.get("text", "")
                         if isinstance(text, str) and text and not full_text:
                             full_text = text
+                            if len(full_text.encode("utf-8")) > self.max_output_bytes:
+                                raise ProcessOutputLimitError(
+                                    f"provider output exceeded {self.max_output_bytes} bytes"
+                                )
                             yield ProviderStreamEvent(delta=text)
                 elif method == "thread/tokenUsage/updated":
                     usage = self._parse_usage(params.get("tokenUsage"))
@@ -373,9 +402,7 @@ class CodexAppServer:
 
     async def _ensure_running(self) -> None:
         if self._process is None or self._process.returncode is not None:
-            detail = self._stderr_text()
-            suffix = f": {detail}" if detail else ""
-            raise ProcessError(f"Codex App Server is not running{suffix}")
+            raise ProcessError("Codex App Server is not running")
 
     async def _read_stdout(
         self, process: asyncio.subprocess.Process, generation: int
@@ -417,27 +444,40 @@ class CodexAppServer:
                 if queue is None and isinstance(thread_id, str):
                     queue = self._thread_queues.get(thread_id)
                 if queue is not None:
-                    queue.put_nowait(message)
+                    try:
+                        queue.put_nowait(message)
+                    except asyncio.QueueFull as exc:
+                        raise ProcessOutputLimitError(
+                            "Codex App Server event queue exceeded its limit"
+                        ) from exc
         except asyncio.CancelledError:
             raise
-        except BaseException as exc:
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
             error = ProcessError(f"Codex App Server reader failed: {exc}")
-        finally:
-            if self._closing or generation != self._generation:
-                return
-            error = error or ProcessError(
-                "Codex App Server exited unexpectedly"
+        if self._closing or generation != self._generation:
+            return
+        error = error or ProcessError(
+            "Codex App Server exited unexpectedly"
+        )
+        self._fail_inflight(error)
+        if not self._automatic_restart_used:
+            self._automatic_restart_used = True
+            self._restart_task = asyncio.create_task(
+                self._restart_once(process, generation)
             )
-            self._fail_inflight(error)
-            if not self._automatic_restart_used:
-                self._automatic_restart_used = True
-                self._restart_task = asyncio.create_task(
-                    self._restart_once(process, generation)
-                )
 
     async def _read_stderr(self, process: asyncio.subprocess.Process) -> None:
         assert process.stderr is not None
+        total_bytes = 0
         while chunk := await process.stderr.read(65_536):
+            total_bytes += len(chunk)
+            if total_bytes > self.max_output_bytes:
+                error = ProcessOutputLimitError(
+                    f"provider output exceeded {self.max_output_bytes} bytes"
+                )
+                self._fail_inflight(error)
+                await self._stop_process(process)
+                return
             self._stderr_tail.extend(chunk)
             excess = len(self._stderr_tail) - self._stderr_retention_bytes
             if excess > 0:
@@ -468,6 +508,11 @@ class CodexAppServer:
             *self._turn_queues.values(),
         }
         for queue in queues:
+            while queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
             queue.put_nowait(message)
 
     def _prepare_runtime(
@@ -515,13 +560,29 @@ class CodexAppServer:
         return command
 
     async def _stop_process(self, process: asyncio.subprocess.Process) -> None:
+        guard = self._process_guard
+        if guard is not None and guard.handle is not None:
+            guard.terminate()
+            await process.wait()
+            await guard.close()
+            if guard is self._process_guard:
+                self._process_guard = None
+            return
         if process.returncode is not None:
             await process.wait()
+            if guard is not None:
+                await guard.close()
+                if guard is self._process_guard:
+                    self._process_guard = None
             return
         if process.stdin is not None:
             process.stdin.close()
         try:
             await asyncio.wait_for(process.wait(), timeout=1)
+            if guard is not None:
+                await guard.close()
+                if guard is self._process_guard:
+                    self._process_guard = None
             return
         except asyncio.TimeoutError:
             pass
@@ -544,12 +605,38 @@ class CodexAppServer:
             except ProcessLookupError:
                 pass
         await process.wait()
+        if guard is not None:
+            await guard.close()
+            if guard is self._process_guard:
+                self._process_guard = None
 
     async def _cleanup_runtime(self) -> None:
         if self._runtime_directory is not None:
             temporary = self._runtime_directory
             self._runtime_directory = None
-            await asyncio.to_thread(temporary.cleanup)
+            cleanup = asyncio.create_task(
+                asyncio.to_thread(self._cleanup_temporary, temporary)
+            )
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+                raise
+
+    @staticmethod
+    def _cleanup_temporary(temporary: tempfile.TemporaryDirectory) -> None:
+        last_error: OSError | None = None
+        for _ in range(20):
+            try:
+                temporary.cleanup()
+                return
+            except OSError as exc:
+                last_error = exc
+                if not Path(temporary.name).exists():
+                    return
+                time.sleep(0.1)
+        if last_error is not None:
+            raise last_error
 
     def _stderr_text(self) -> str:
         return bytes(self._stderr_tail).decode("utf-8", errors="replace").strip()

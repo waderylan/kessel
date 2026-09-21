@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.models import ChatCompletionRequest, ProviderResult
+from app.runner import ProcessError
 from app.structured import output_schema, parse_structured_result
 
 
@@ -59,3 +60,32 @@ def test_unsupported_tool_surfaces_are_rejected() -> None:
     payload["tools"][0]["function"]["strict"] = True
     with pytest.raises(ValidationError, match="strict tool schemas"):
         ChatCompletionRequest.model_validate(payload)
+
+
+def test_malformed_or_referenced_schemas_are_rejected() -> None:
+    payload = tool_request().model_dump()
+    payload["tools"][0]["function"]["parameters"] = {"type": "not-a-type"}
+    with pytest.raises(ValidationError, match="invalid JSON schema"):
+        ChatCompletionRequest.model_validate(payload)
+
+    payload = tool_request().model_dump()
+    payload["tools"][0]["function"]["parameters"] = {
+        "$ref": "https://attacker.example/schema.json"
+    }
+    with pytest.raises(ValidationError, match="JSON Schema references"):
+        ChatCompletionRequest.model_validate(payload)
+
+    payload["tools"][0]["function"]["parameters"] = {"$ref": "#"}
+    with pytest.raises(ValidationError, match="JSON Schema references"):
+        ChatCompletionRequest.model_validate(payload)
+
+
+def test_structured_result_must_match_requested_schema() -> None:
+    with pytest.raises(ProcessError, match="does not match"):
+        parse_structured_result(
+            tool_request(),
+            ProviderResult(
+                text='{"name":"get_weather","arguments":{"city":42}}',
+                model="default",
+            ),
+        )

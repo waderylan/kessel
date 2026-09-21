@@ -5,10 +5,32 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Literal
 
+from jsonschema.exceptions import SchemaError
+from jsonschema.validators import validator_for
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 PositiveStrictInt = Annotated[int, Field(strict=True, gt=0)]
+
+
+def _validate_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    stack: list[tuple[object, int]] = [(schema, 0)]
+    while stack:
+        value, depth = stack.pop()
+        if depth > 32:
+            raise ValueError("JSON schemas may not exceed 32 nested levels")
+        if isinstance(value, dict):
+            reference = value.get("$ref")
+            if isinstance(reference, str):
+                raise ValueError("JSON Schema references are not supported")
+            stack.extend((item, depth + 1) for item in value.values())
+        elif isinstance(value, list):
+            stack.extend((item, depth + 1) for item in value)
+    try:
+        validator_for(schema).check_schema(schema)
+    except SchemaError as exc:
+        raise ValueError(f"invalid JSON schema: {exc.message}") from exc
+    return schema
 
 
 class TextPart(BaseModel):
@@ -42,6 +64,11 @@ class FunctionDefinition(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=lambda: {"type": "object"})
     strict: bool = False
 
+    @field_validator("parameters")
+    @classmethod
+    def validate_parameters(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _validate_schema(value)
+
 
 class FunctionTool(BaseModel):
     type: Literal["function"]
@@ -55,6 +82,11 @@ class JsonSchemaDefinition(BaseModel):
     description: str | None = None
     schema_: dict[str, Any] = Field(alias="schema", serialization_alias="schema")
     strict: bool = False
+
+    @field_validator("schema_")
+    @classmethod
+    def validate_schema(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _validate_schema(value)
 
 
 class ResponseFormat(BaseModel):

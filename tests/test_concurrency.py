@@ -35,6 +35,7 @@ def make_settings() -> Settings:
         codex_command="codex",
         claude_command="claude",
         enforce_cli_versions=False,
+        allow_unauthenticated=True,
     )
 
 
@@ -153,7 +154,7 @@ async def test_requests_within_provider_limit_run_concurrently(
     app = create_app(make_settings(), registry=registry)
 
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
     ) as client:
         started = time.monotonic()
         responses = await asyncio.gather(
@@ -190,7 +191,7 @@ async def test_provider_limits_are_independent(tmp_path: Path) -> None:
     app = create_app(make_settings(), registry=registry)
 
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
     ) as client:
         started = time.monotonic()
         responses = await asyncio.gather(
@@ -227,7 +228,7 @@ async def test_health_remains_responsive_while_slots_are_busy(
     app = create_app(make_settings(), registry=registry)
 
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
     ) as client:
         requests = [
             asyncio.create_task(
@@ -290,7 +291,7 @@ async def test_provider_queue_timeout_returns_native_429(
     app = create_app(make_settings(), registry=registry)
 
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
     ) as client:
         first = asyncio.create_task(client.post(path, json=payload))
         await wait_for_processes(runner, 1)

@@ -70,7 +70,11 @@ def test_setup_is_idempotent(
     check = ProviderHealth("claude", "Claude Code", True, True, "1.0.0")
     monkeypatch.setattr(cli, "check_providers", lambda: [check])
     monkeypatch.setattr(cli, "_test_provider", lambda config, provider: (True, "OK"))
-    monkeypatch.setattr(cli, "_copy_to_clipboard", lambda value: True)
+    monkeypatch.setattr(
+        cli,
+        "_copy_to_clipboard",
+        lambda value: pytest.fail("setup must not copy secrets to the clipboard"),
+    )
 
     changes = iter((True, False))
 
@@ -90,12 +94,29 @@ def test_setup_is_idempotent(
     first_key = UserConfig.load().api_key
     first_output = capsys.readouterr().out
     assert "Generated a local API key" in first_output
+    assert first_key not in first_output
+    assert "run `kessel key` to reveal it" in first_output
 
     assert cli.main(["setup"]) == 0
     second_output = capsys.readouterr().out
     assert "API key already exists" in second_output
     assert "Background service is already running" in second_output
     assert UserConfig.load().api_key == first_key
+
+
+def test_key_rotation_does_not_print_secret(
+    configured: UserConfig, capsys
+) -> None:
+    old_key = configured.api_key
+
+    assert cli.main(["key", "--rotate"]) == 0
+    output = capsys.readouterr().out
+    new_key = UserConfig.load().api_key
+
+    assert new_key != old_key
+    assert old_key not in output
+    assert new_key not in output
+    assert "rotated" in output
 
 
 def test_status_has_actionable_not_running_error(

@@ -52,18 +52,44 @@ class UserConfig:
 
     def save(self) -> None:
         path = self.path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8"
-        )
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if os.name != "nt":
-            temporary.chmod(0o600)
-        temporary.replace(path)
+            path.parent.chmod(0o700)
+        temporary = path.with_name(
+            f".{path.name}.{secrets.token_hex(8)}.tmp"
+        )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        descriptor = os.open(temporary, flags, 0o600)
+        try:
+            payload = (json.dumps(asdict(self), indent=2) + "\n").encode("utf-8")
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(path)
+            if os.name != "nt":
+                path.chmod(0o600)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
     def with_generated_key(self) -> "UserConfig":
         if self.api_key:
             return self
+        return UserConfig(
+            api_key="kessel_" + secrets.token_urlsafe(32),
+            host=self.host,
+            port=self.port,
+            codex_command=self.codex_command,
+            claude_command=self.claude_command,
+        )
+
+    def with_rotated_key(self) -> "UserConfig":
         return UserConfig(
             api_key="kessel_" + secrets.token_urlsafe(32),
             host=self.host,

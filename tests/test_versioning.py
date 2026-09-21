@@ -9,6 +9,12 @@ from app.versioning import (
 )
 
 
+def test_version_enforcement_defaults_on(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("KESSEL_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.delenv("KESSEL_ENFORCE_CLI_VERSIONS", raising=False)
+    assert Settings.from_environment().enforce_cli_versions is True
+
+
 def test_parse_codex_and_claude_versions() -> None:
     assert parse_version("codex-cli 0.155.1") == "0.155.1"
     assert parse_version("2.1.278 (Claude Code)") == "2.1.278"

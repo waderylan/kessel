@@ -8,12 +8,14 @@ import pytest
 from app.models import ChatCompletionRequest
 from app.output_control import control_output_stream
 from app.providers.codex_app_server import CodexAppServer
-from app.runner import ProcessError
+from app.runner import ProcessError, ProcessOutputLimitError
 
 
 class FakeAppServer(CodexAppServer):
-    def __init__(self, instructions_path: Path) -> None:
-        super().__init__("codex", 2, instructions_path, ())
+    def __init__(self, instructions_path: Path, max_output_bytes: int = 1_048_576) -> None:
+        super().__init__(
+            "codex", 2, instructions_path, (), max_output_bytes=max_output_bytes
+        )
         self.calls: list[tuple[str, dict]] = []
         self._runtime_directory = tempfile.TemporaryDirectory(
             prefix="kessel-test-app-server-"
@@ -91,6 +93,28 @@ async def test_max_tokens_interrupts_warm_turn(tmp_path: Path) -> None:
     server._runtime_directory.cleanup()
 
 
+@pytest.mark.asyncio
+async def test_warm_output_limit_interrupts_turn(tmp_path: Path) -> None:
+    instructions = tmp_path / "instructions.txt"
+    instructions.write_text("test", encoding="utf-8")
+    server = FakeAppServer(instructions, max_output_bytes=4)
+    request = ChatCompletionRequest(
+        model="default",
+        backend="warm",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+
+    with pytest.raises(ProcessOutputLimitError, match="exceeded 4 bytes"):
+        async for _ in server.stream(request, "hello", tmp_path, None):
+            pass
+
+    assert (
+        "turn/interrupt",
+        {"threadId": "thread-1", "turnId": "turn-1"},
+    ) in server.calls
+    server._runtime_directory.cleanup()
+
+
 def test_rate_limit_snapshot_uses_most_consumed_window() -> None:
     snapshot = CodexAppServer._parse_rate_limit(
         {
@@ -140,3 +164,52 @@ async def test_app_server_death_fails_inflight_and_restarts_once(
         await pending
     assert (await queue.get())["method"] == "server/error"
     assert server.restart_count == 1
+
+
+@pytest.mark.asyncio
+async def test_start_failure_removes_private_runtime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instructions = tmp_path / "instructions.txt"
+    instructions.write_text("test", encoding="utf-8")
+    server = CodexAppServer("codex", 2, instructions, ())
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "source-home"))
+    monkeypatch.setattr("app.providers.codex_app_server.shutil.which", lambda _: "codex")
+
+    async def fail_spawn(*args, **kwargs):
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_spawn)
+
+    with pytest.raises(OSError, match="spawn failed"):
+        await server.start()
+    assert server._runtime_directory is None
+
+
+@pytest.mark.asyncio
+async def test_warm_stderr_limit_fails_inflight_and_stops_process(
+    tmp_path: Path, monkeypatch
+) -> None:
+    instructions = tmp_path / "instructions.txt"
+    instructions.write_text("test", encoding="utf-8")
+    server = CodexAppServer("codex", 2, instructions, (), max_output_bytes=4)
+    stderr = asyncio.StreamReader()
+    process = SimpleNamespace(stderr=stderr)
+    pending = asyncio.get_running_loop().create_future()
+    server._pending[1] = pending
+    stopped = False
+
+    async def record_stop(candidate) -> None:
+        nonlocal stopped
+        assert candidate is process
+        stopped = True
+
+    monkeypatch.setattr(server, "_stop_process", record_stop)
+    stderr.feed_data(b"12345")
+    stderr.feed_eof()
+
+    await server._read_stderr(process)
+
+    with pytest.raises(ProcessOutputLimitError, match="exceeded 4 bytes"):
+        await pending
+    assert stopped is True

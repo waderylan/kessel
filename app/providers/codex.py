@@ -54,6 +54,7 @@ class CodexProvider(ProviderAdapter):
         self.app_server = CodexAppServer(
             command=command,
             timeout_seconds=runner.timeout_seconds,
+            max_output_bytes=runner.max_output_bytes,
             instructions_path=Path(__file__).with_name("codex_instructions.txt").resolve(),
             disabled_features=self.DISABLED_FEATURES,
         )

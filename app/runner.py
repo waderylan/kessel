@@ -12,6 +12,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.process_security import ProcessGroupGuard, child_environment
+
 
 class ProcessError(RuntimeError):
     """Base error for provider subprocess failures."""
@@ -109,6 +111,7 @@ class ProcessRunner:
         self.max_output_bytes = max_output_bytes
         self.stderr_retention_bytes = stderr_retention_bytes
         self._processes: set[asyncio.subprocess.Process] = set()
+        self._guards: dict[asyncio.subprocess.Process, ProcessGroupGuard] = {}
 
     @property
     def active_process_count(self) -> int:
@@ -119,8 +122,9 @@ class ProcessRunner:
         command: list[str],
         stdin_text: str,
         cwd: Path,
+        env_overrides: dict[str, str] | None = None,
     ) -> ProcessResult:
-        process = await self._spawn(command, cwd)
+        process = await self._spawn(command, cwd, env_overrides)
         assert process.stdout is not None
         assert process.stderr is not None
 
@@ -171,16 +175,18 @@ class ProcessRunner:
             if process.returncode is None:
                 await self._kill_process_group(process)
             self._processes.discard(process)
+            await self._release_guard(process)
 
     async def stream_lines(
         self,
         command: list[str],
         stdin_text: str,
         cwd: Path,
+        env_overrides: dict[str, str] | None = None,
     ) -> AsyncIterator[str]:
         """Yield newline-delimited stdout while draining stderr concurrently."""
 
-        process = await self._spawn(command, cwd)
+        process = await self._spawn(command, cwd, env_overrides)
         assert process.stdout is not None
         assert process.stderr is not None
 
@@ -198,9 +204,14 @@ class ProcessRunner:
                     )
                     if remaining <= 0:
                         raise asyncio.TimeoutError
-                    line = await asyncio.wait_for(
-                        process.stdout.readline(), timeout=remaining
-                    )
+                    try:
+                        line = await asyncio.wait_for(
+                            process.stdout.readline(), timeout=remaining
+                        )
+                    except ValueError as exc:
+                        raise ProcessOutputLimitError(
+                            "provider emitted an oversized output line"
+                        ) from exc
                     if not line:
                         break
                     stdout_bytes += len(line)
@@ -242,6 +253,7 @@ class ProcessRunner:
                 await self._kill_process_group(process)
             await self._finish_tasks(stdin_task, stderr_task)
             self._processes.discard(process)
+            await self._release_guard(process)
 
     async def terminate_all(self) -> None:
         """Kill and reap every child process still owned by this runner."""
@@ -253,7 +265,10 @@ class ProcessRunner:
         self._processes.clear()
 
     async def _spawn(
-        self, command: list[str], cwd: Path
+        self,
+        command: list[str],
+        cwd: Path,
+        env_overrides: dict[str, str] | None = None,
     ) -> asyncio.subprocess.Process:
         executable = await asyncio.to_thread(shutil.which, command[0])
         if executable is None:
@@ -265,8 +280,7 @@ class ProcessRunner:
         else:
             process_options["start_new_session"] = True
 
-        env = os.environ.copy()
-        env["NO_COLOR"] = "1"
+        env = child_environment(env_overrides)
         try:
             process = await asyncio.create_subprocess_exec(
                 executable,
@@ -283,6 +297,7 @@ class ProcessRunner:
                 f"command not found: {command[0]}"
             ) from exc
         self._processes.add(process)
+        self._guards[process] = ProcessGroupGuard.attach(process)
         return process
 
     @staticmethod
@@ -316,8 +331,19 @@ class ProcessRunner:
     async def _kill_process_group(
         self, process: asyncio.subprocess.Process
     ) -> None:
+        guard = self._guards.get(process)
+        if guard is not None and guard.handle is not None:
+            guard.terminate()
+            await process.wait()
+            await guard.close()
+            self._guards.pop(process, None)
+            return
+
         if process.returncode is not None:
             await process.wait()
+            if guard is not None:
+                await guard.close()
+                self._guards.pop(process, None)
             return
 
         if os.name == "nt":
@@ -339,6 +365,14 @@ class ProcessRunner:
             except ProcessLookupError:
                 pass
         await process.wait()
+        if guard is not None:
+            await guard.close()
+            self._guards.pop(process, None)
+
+    async def _release_guard(self, process: asyncio.subprocess.Process) -> None:
+        guard = self._guards.pop(process, None)
+        if guard is not None:
+            await guard.close()
 
     @staticmethod
     async def _finish_tasks(*tasks: asyncio.Task) -> None:

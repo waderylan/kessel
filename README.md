@@ -40,8 +40,8 @@ command:
 3. Installs and starts a per-user service using systemd, launchd, or Windows
    Task Scheduler.
 4. Sends a small request through every provider that passed the checks.
-5. Prints the URLs and key, then copies the key to the clipboard when a system
-   clipboard command is available.
+5. Prints the local URLs. Use `kessel key` only when the credential is needed;
+   setup does not place the key in terminal scrollback or the clipboard.
 
 The command is idempotent. Running it again preserves the key, keeps a healthy
 service running, and repairs a stopped or missing service. One provider can be
@@ -62,6 +62,8 @@ depend on the shell's `PATH`.
 | `kessel status` | Print the service URL or the exact start command |
 | `kessel doctor` | Recheck provider installation and login |
 | `kessel key` | Print the configured API key |
+| `kessel key --copy` | Copy the key without printing it |
+| `kessel key --rotate` | Atomically replace the saved key |
 
 The local web client is at `http://127.0.0.1:8000`; OpenAPI documentation is at
 `http://127.0.0.1:8000/docs`.
@@ -167,7 +169,7 @@ X-API-Key: kessel_...
 | `POST` | `/v1/claude/chat/completions` | OpenAI Chat Completions through Claude Code |
 | `POST` | `/v1/messages` | Anthropic Messages through Claude Code |
 | `GET` | `/v1/{provider}/models` | Provider model discovery |
-| `GET` | `/health` | Process availability and tested CLI versions |
+| `GET` | `/health` | Provider availability without paths or versions |
 
 All responses include `X-Request-ID`. Responses from `/v1/messages` also
 include the Anthropic-compatible `request-id` header.
@@ -469,17 +471,18 @@ use error code `provider_busy`; `/v1/messages` uses Anthropic's
 | Environment variable | Default | Description |
 | --- | --- | --- |
 | `KESSEL_API_KEY` | Saved config value | Override the generated local API credential |
-| `KESSEL_CORS_ORIGINS` | Local port 8000 origins | Comma-separated allowed origins |
+| `KESSEL_CORS_ORIGINS` | IPv4, hostname, and IPv6 loopback origins | Comma-separated allowed origins |
 | `KESSEL_REQUEST_TIMEOUT_SECONDS` | `300` | Provider request timeout |
 | `KESSEL_MAX_CONCURRENT_REQUESTS` | `2` | Fallback limit for each provider |
 | `KESSEL_CODEX_MAX_CONCURRENT_REQUESTS` | `2` | Codex concurrency limit |
 | `KESSEL_CLAUDE_MAX_CONCURRENT_REQUESTS` | `2` | Claude concurrency limit |
 | `KESSEL_PROVIDER_SLOT_WAIT_SECONDS` | `5` | Maximum wait for a provider slot |
 | `KESSEL_MAX_OUTPUT_BYTES` | `1048576` | Maximum provider stdout and stderr bytes |
+| `KESSEL_MAX_REQUEST_BYTES` | `1048576` | Maximum buffered HTTP request body bytes |
 | `KESSEL_SHUTDOWN_GRACE_SECONDS` | `5` | Grace before active requests are cancelled |
 | `KESSEL_CODEX_COMMAND` | `codex` | Codex executable name or path |
 | `KESSEL_CLAUDE_COMMAND` | `claude` | Claude executable name or path |
-| `KESSEL_ENFORCE_CLI_VERSIONS` | `false` | Enforce the versions recorded in `Settings` |
+| `KESSEL_ENFORCE_CLI_VERSIONS` | `true` | Enforce the tested provider CLI versions |
 
 Example:
 
@@ -491,14 +494,16 @@ kessel serve
 
 ## Security properties
 
-- The documented server command binds to `127.0.0.1` only.
+- The server binds to `127.0.0.1` only and rejects non-loopback `Host` headers.
+- Browser origins are allowlisted, JSON routes reject simple content types, and
+  all `/v1` routes require the local API key.
 - Kessel does not store request bodies or conversation history.
 - Request logs contain IDs, routes, status, and duration, not prompt content.
 - Provider processes receive request content over standard input.
 - Subprocesses are created asynchronously in new process groups, with argument
   arrays and without shell interpolation.
-- Standard output and standard error are drained concurrently. Kessel retains
-  at most 64 KiB of provider standard error for diagnostics.
+- Standard output and standard error are drained concurrently and bounded.
+  Provider stderr is never returned to API clients.
 - Fresh Codex uses an ephemeral session and read-only sandbox.
 - Warm Codex uses an isolated runtime home containing only its authentication
   file.
@@ -513,9 +518,10 @@ lifespan cleanup runs. Kessel waits for active requests for
 `KESSEL_SHUTDOWN_GRACE_SECONDS`, cancels remaining tasks, interrupts warm
 turns, and kills all remaining fresh-process groups before shutdown completes.
 
-Provider subprocesses inherit the current user's environment and use existing
-CLI authentication. Kessel is a local compatibility layer, not a security
-boundary between the current user and provider software.
+Provider subprocesses receive an allowlisted environment containing only the
+operating-system, executable-discovery, locale, and provider-home values they
+need. Kessel is a local compatibility layer, not a security boundary between
+the current user and provider software.
 
 ## Benchmarks
 

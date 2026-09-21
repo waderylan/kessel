@@ -212,13 +212,11 @@ def command_setup() -> int:
             print(f"[error] {check.display_name} test request failed: {detail}")
             tests_failed = True
 
-    copied = _copy_to_clipboard(config.api_key or "")
     print("\nConnection details")
     print(f"OpenAI base URL (Claude): {config.base_url}/v1/claude")
     print(f"OpenAI base URL (Codex):  {config.base_url}/v1/codex")
     print(f"Anthropic base URL:       {config.base_url}")
-    print(f"API key:                  {config.api_key}")
-    print("API key copied to the clipboard." if copied else "Clipboard unavailable; copy the API key shown above.")
+    print("API key:                  run `kessel key` to reveal it")
     return 1 if tests_failed else 0
 
 
@@ -240,6 +238,8 @@ def command_serve() -> int:
     import uvicorn
 
     config = UserConfig.load()
+    if not (os.getenv("KESSEL_API_KEY") or config.api_key):
+        raise RuntimeError("Kessel is not set up. Run: kessel setup")
     uvicorn.run(
         "app.main:app",
         host=config.host,
@@ -263,7 +263,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     connect = subparsers.add_parser("connect", help="print setup for a client")
     connect.add_argument("tool")
-    subparsers.add_parser("key", help="print the local API key")
+    key_parser = subparsers.add_parser("key", help="manage the local API key")
+    key_parser.add_argument(
+        "--rotate", action="store_true", help="replace the saved API key"
+    )
+    key_parser.add_argument(
+        "--copy", action="store_true", help="copy the key without printing it"
+    )
     subparsers.add_parser("start", help="install and start the background service")
     subparsers.add_parser("stop", help="stop the background service")
     subparsers.add_parser("status", help="show whether the service is running")
@@ -288,7 +294,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "key":
             config, _ = load_or_create_config()
-            print(config.api_key)
+            if args.rotate:
+                if os.getenv("KESSEL_API_KEY"):
+                    raise RuntimeError(
+                        "Cannot rotate while KESSEL_API_KEY overrides the saved key"
+                    )
+                config = config.with_rotated_key()
+                config.save()
+                print("Kessel API key rotated. Existing clients must use the new key.")
+            if args.copy:
+                if not _copy_to_clipboard(config.api_key or ""):
+                    raise RuntimeError("Clipboard unavailable")
+                print("Kessel API key copied to the clipboard.")
+            elif not args.rotate:
+                print(config.api_key)
             return 0
         if args.command == "start":
             return command_start()

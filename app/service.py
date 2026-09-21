@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import plistlib
-import shlex
 import subprocess
 import sys
 import time
@@ -56,7 +55,9 @@ class ServiceManager:
 
         if self.is_running():
             return False
-        self.log_directory.mkdir(parents=True, exist_ok=True)
+        self.log_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            self.log_directory.chmod(0o700)
         if sys.platform == "win32":
             self._install_windows()
         elif sys.platform == "darwin":
@@ -127,7 +128,7 @@ class ServiceManager:
         unit_directory = Path.home() / ".config" / "systemd" / "user"
         unit_directory.mkdir(parents=True, exist_ok=True)
         unit_path = unit_directory / "kessel.service"
-        command = " ".join(shlex.quote(part) for part in self.command)
+        command = " ".join(self._systemd_quote(part) for part in self.command)
         unit = (
             "[Unit]\n"
             "Description=Kessel local API\n"
@@ -141,6 +142,7 @@ class ServiceManager:
         )
         if not unit_path.exists() or unit_path.read_text(encoding="utf-8") != unit:
             unit_path.write_text(unit, encoding="utf-8")
+            unit_path.chmod(0o600)
         self._run(["systemctl", "--user", "daemon-reload"])
         self._run(
             ["systemctl", "--user", "enable", "--now", "kessel.service"]
@@ -155,8 +157,8 @@ class ServiceManager:
             "ProgramArguments": self.command,
             "RunAtLoad": True,
             "KeepAlive": {"SuccessfulExit": False},
-            "StandardOutPath": str(self.log_directory / "kessel.log"),
-            "StandardErrorPath": str(self.log_directory / "kessel-error.log"),
+            "StandardOutPath": os.devnull,
+            "StandardErrorPath": os.devnull,
         }
         serialized = plistlib.dumps(payload)
         changed = not plist_path.exists() or plist_path.read_bytes() != serialized
@@ -171,6 +173,7 @@ class ServiceManager:
                 allow_failure=True,
             )
             plist_path.write_bytes(serialized)
+            plist_path.chmod(0o600)
             self._run(
                 [
                     "launchctl",
@@ -197,6 +200,16 @@ class ServiceManager:
                         str(plist_path),
                     ]
                 )
+
+    @staticmethod
+    def _systemd_quote(value: str) -> str:
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("$", "$$")
+            .replace("%", "%%")
+        )
+        return f'"{escaped}"'
 
     @staticmethod
     def _run(

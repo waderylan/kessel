@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 
-from app.models import ChatCompletionRequest, ChatMessage
+from app.models import ChatCompletionRequest
+from app.structured import output_schema
 
 
 ROLE_LABELS = {
@@ -48,6 +49,13 @@ def build_prompt(request: ChatCompletionRequest) -> str:
         sections.append(
             "[TOOL_INSTRUCTIONS]\n"
             f"{choice_instruction} Produce at most one function call."
+        )
+    schema = output_schema(request)
+    if schema is not None:
+        sections.append(
+            "[OUTPUT_SCHEMA]\n"
+            + json.dumps(schema, separators=(",", ":"))
+            + "\nReturn only one JSON value that conforms to this schema."
         )
     sections.append("[ASSISTANT]")
     return "\n\n".join(sections)

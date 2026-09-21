@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import shutil
@@ -46,6 +47,7 @@ from app.runner import (
     ProviderRateLimitError,
 )
 from app.versioning import verify_cli_versions
+from app.user_config import UserConfig
 
 
 STATIC_DIRECTORY = Path(__file__).parent / "static"
@@ -125,6 +127,63 @@ def create_app(
                 "x-kessel-model-discovery",
             ],
         )
+
+    @application.middleware("http")
+    async def local_request_guard(request: Request, call_next):
+        request_id = getattr(request.state, "request_id", f"req_local_{uuid.uuid4().hex}")
+        request.state.request_id = request_id
+        allowed_hosts = {
+            f"127.0.0.1:{app_settings.listen_port}",
+            f"localhost:{app_settings.listen_port}",
+            f"[::1]:{app_settings.listen_port}",
+        }
+
+        def reject(status_code: int, message: str, code: str) -> JSONResponse:
+            response = error_response(request, status_code, message, code)
+            response.headers["x-request-id"] = request_id
+            if is_anthropic(request):
+                response.headers["request-id"] = request_id
+            return response
+
+        host = request.headers.get("host", "").lower()
+        if host not in allowed_hosts:
+            return reject(421, "Invalid Host header", "invalid_host")
+
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in app_settings.cors_origins:
+            return reject(403, "Origin is not allowed", "origin_not_allowed")
+
+        if request.method == "POST" and request.url.path.startswith("/v1/"):
+            media_type = request.headers.get("content-type", "").split(";", 1)[0]
+            if media_type.lower().strip() != "application/json":
+                return reject(
+                    415,
+                    "Content-Type must be application/json",
+                    "unsupported_media_type",
+                )
+
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except ValueError:
+                return reject(400, "Invalid Content-Length header", "invalid_request")
+            if declared_length < 0:
+                return reject(400, "Invalid Content-Length header", "invalid_request")
+            if declared_length > app_settings.max_request_bytes:
+                return reject(413, "Request body is too large", "request_too_large")
+
+        if request.method in {"POST", "PUT", "PATCH"}:
+            body = bytearray()
+            async for chunk in request.stream():
+                body.extend(chunk)
+                if len(body) > app_settings.max_request_bytes:
+                    return reject(
+                        413, "Request body is too large", "request_too_large"
+                    )
+            request._body = bytes(body)
+
+        return await call_next(request)
 
     @application.middleware("http")
     async def request_logging(request: Request, call_next):
@@ -231,14 +290,31 @@ def create_app(
         x_api_key: str | None = Header(default=None),
     ) -> None:
         expected_key = application.state.settings.api_key
+        if application.state.settings.reload_api_key_from_config:
+            try:
+                expected_key = (await asyncio.to_thread(UserConfig.load)).api_key
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Kessel configuration is invalid",
+                ) from exc
         if not expected_key:
-            return
+            if application.state.settings.allow_unauthenticated:
+                return
+            raise HTTPException(
+                status_code=503,
+                detail="Kessel has no API key. Run: kessel setup",
+            )
         supplied_key = ""
-        if authorization and authorization.startswith("Bearer "):
-            supplied_key = authorization.removeprefix("Bearer ")
+        if authorization:
+            parts = authorization.split(None, 1)
+            if len(parts) == 2 and parts[0].lower() == "bearer":
+                supplied_key = parts[1]
         if not supplied_key and x_api_key:
             supplied_key = x_api_key
-        if not secrets.compare_digest(supplied_key, expected_key):
+        supplied_digest = hashlib.sha256(supplied_key.encode("utf-8")).digest()
+        expected_digest = hashlib.sha256(expected_key.encode("utf-8")).digest()
+        if not secrets.compare_digest(supplied_digest, expected_digest):
             raise HTTPException(
                 status_code=401,
                 detail=(
@@ -276,7 +352,7 @@ def create_app(
                 404: "not_found_error",
                 413: "request_too_large",
                 429: "rate_limit_error",
-                503: "overloaded_error",
+                529: "overloaded_error",
             }
             content = {
                 "type": "error",
@@ -382,7 +458,15 @@ def create_app(
         else:
             status_code, code = 502, "provider_error"
 
-        message = str(exc)
+        message = {
+            "provider_busy": "Provider concurrency limit reached",
+            "rate_limit_exceeded": "Provider subscription quota is exhausted",
+            "provider_not_installed": "Provider command is not installed",
+            "provider_timeout": "Provider request timed out",
+            "provider_output_limit": "Provider output exceeded the configured limit",
+            "provider_process_failed": "Provider process failed",
+            "provider_error": "Provider request failed",
+        }.get(code, "Provider request failed")
         if isinstance(exc, ProviderAuthenticationError) or process_auth_error:
             auth_provider = (
                 exc.provider
@@ -400,12 +484,6 @@ def create_app(
                 f"{message}. Quota resets at "
                 f"{reset_at.isoformat(timespec='minutes')}"
             )
-        if (
-            isinstance(exc, ProcessExitError)
-            and exc.stderr
-            and not process_auth_error
-        ):
-            message = f"{message}: {exc.stderr[-1000:]}"
         headers = None
         if isinstance(exc, ProviderBusyError):
             retry_after = str(max(1, exc.retry_after_seconds or 1))
@@ -431,18 +509,7 @@ def create_app(
             command = application.state.registry.get(name).command
             executable = await asyncio.to_thread(shutil.which, command)
             provider_status[name] = {
-                "command": command,
                 "available": executable is not None,
-                "version": (
-                    application.state.cli_versions[name].actual
-                    if name in application.state.cli_versions
-                    else None
-                ),
-                "tested_version": (
-                    application.state.cli_versions[name].expected
-                    if name in application.state.cli_versions
-                    else None
-                ),
             }
         return {"status": "ok", "providers": provider_status}
 
@@ -594,8 +661,21 @@ def create_app(
     ) -> Response:
         if provider not in application.state.registry.names:
             raise HTTPException(status_code=404, detail="Unknown provider")
+        if not await application.state.registry.accepts_model(provider, body.model):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "Unknown or unapproved model",
+                    "param": "model",
+                    "code": "invalid_model",
+                },
+            )
         validate_chat_surface(body)
-        headers = await preflight_headers(provider)
+        headers = (
+            await preflight_headers(provider)
+            if provider != "codex" or body.backend == "warm"
+            else {}
+        )
         if body.backend == "warm" and provider != "codex":
             raise HTTPException(
                 status_code=400,
@@ -625,7 +705,7 @@ def create_app(
                     return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
 
                 def chunk(delta: dict[str, object], finish_reason=None) -> dict:
-                    return {
+                    payload = {
                         "id": completion_id,
                         "object": "chat.completion.chunk",
                         "created": created,
@@ -639,6 +719,9 @@ def create_app(
                             }
                         ],
                     }
+                    if body.stream_options and body.stream_options.include_usage:
+                        payload["usage"] = None
+                    return payload
 
                 yield encode(chunk({"role": "assistant", "content": ""}))
                 try:
@@ -700,7 +783,11 @@ def create_app(
                     rate_limited = isinstance(exc, ProviderRateLimitError)
                     yield encode(
                         error_content(
-                            str(exc),
+                            (
+                                "Provider subscription quota is exhausted"
+                                if rate_limited
+                                else "Provider stream failed"
+                            ),
                             "rate_limit_error" if rate_limited else "server_error",
                             "rate_limit_exceeded" if rate_limited else "stream_error",
                         )
@@ -741,7 +828,8 @@ def create_app(
             ],
             usage=result.usage,
         )
-        headers.update(await current_rate_limit_headers(provider))
+        if body.backend == "warm":
+            headers.update(await current_rate_limit_headers(provider))
         return JSONResponse(content=payload.model_dump(), headers=headers)
 
     @application.post(
@@ -771,6 +859,17 @@ def create_app(
             chat_request = body.to_chat_request()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not await application.state.registry.accepts_model(
+            "claude", chat_request.model
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "Unknown or unapproved model",
+                    "param": "model",
+                    "code": "invalid_model",
+                },
+            )
 
         message_id = f"msg_local_{uuid.uuid4().hex}"
         if body.stream:
@@ -855,11 +954,22 @@ def create_app(
                                 {
                                     "type": "content_block_start",
                                     "index": 0,
-                                    "content_block": {
-                                        "type": "tool_use",
-                                        "id": tool.id,
-                                        "name": tool.function.name,
-                                        "input": json.loads(tool.function.arguments),
+                                        "content_block": {
+                                            "type": "tool_use",
+                                            "id": tool.id,
+                                            "name": tool.function.name,
+                                            "input": {},
+                                        },
+                                    },
+                                )
+                            yield encode(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": 0,
+                                    "delta": {
+                                        "type": "input_json_delta",
+                                        "partial_json": tool.function.arguments,
                                     },
                                 },
                             )
@@ -924,11 +1034,16 @@ def create_app(
                                     if rate_limited
                                     else "api_error"
                                 ),
-                                "message": str(exc),
+                                "message": (
+                                    "Provider subscription quota is exhausted"
+                                    if rate_limited
+                                    else "Provider stream failed"
+                                ),
                             },
                             "request_id": raw_request.state.request_id,
                         },
                     )
+                    return
                 finally:
                     await provider_stream.aclose()
                 yield encode("message_stop", {"type": "message_stop"})

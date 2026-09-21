@@ -31,6 +31,7 @@ def settings() -> Settings:
         max_output_bytes=10_000,
         codex_command="codex",
         claude_command="claude",
+        allow_unauthenticated=True,
     )
 
 
@@ -53,6 +54,9 @@ class ChunkRegistry:
 
     async def rate_limit(self, provider_name: str):
         return None
+
+    async def accepts_model(self, provider_name: str, model: str) -> bool:
+        return True
 
     async def complete(
         self, provider_name: str, request: ChatCompletionRequest
@@ -117,7 +121,7 @@ async def test_openai_max_tokens_per_backend(
     registry = ChunkRegistry(["alpha", " beta", " gamma"])
     app = create_app(settings(), registry=registry)
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         response = await client.post(
             f"/v1/{provider}/chat/completions",
             json={
@@ -161,7 +165,7 @@ async def test_anthropic_max_tokens_streaming_and_buffered(streaming: bool) -> N
     registry = ChunkRegistry(["alpha", " beta", " gamma"])
     app = create_app(settings(), registry=registry)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
     ) as client:
         response = await client.post(
             "/v1/messages",
@@ -200,7 +204,7 @@ async def test_max_completion_tokens_alias_is_enforced() -> None:
     registry = ChunkRegistry(["alpha", " beta", " gamma"])
     app = create_app(settings(), registry=registry)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
     ) as client:
         response = await client.post(
             "/v1/codex/chat/completions",
@@ -294,7 +298,7 @@ async def test_natural_completion_under_max_tokens_is_unchanged() -> None:
     registry = ChunkRegistry(["short"])
     app = create_app(settings(), registry=registry)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
     ) as client:
         response = await client.post(
             "/v1/codex/chat/completions",
@@ -317,7 +321,7 @@ async def test_openai_stop_sequence_streaming_and_buffered(streaming: bool) -> N
     registry = ChunkRegistry(["before ST", "OP after"])
     app = create_app(settings(), registry=registry)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
     ) as client:
         response = await client.post(
             "/v1/codex/chat/completions",
@@ -356,7 +360,7 @@ async def test_anthropic_stop_sequence_field(streaming: bool) -> None:
     registry = ChunkRegistry(["before ST", "OP after"])
     app = create_app(settings(), registry=registry)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
     ) as client:
         response = await client.post(
             "/v1/messages",
@@ -389,7 +393,7 @@ async def test_anthropic_stop_sequence_field(streaming: bool) -> None:
 async def test_invalid_openai_token_limits(field: str, value: object) -> None:
     app = create_app(settings(), registry=ChunkRegistry(["hello"]))
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
     ) as client:
         response = await client.post(
             "/v1/codex/chat/completions",
@@ -410,7 +414,7 @@ async def test_invalid_openai_token_limits(field: str, value: object) -> None:
 async def test_invalid_anthropic_token_limits(value: object) -> None:
     app = create_app(settings(), registry=ChunkRegistry(["hello"]))
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
     ) as client:
         response = await client.post(
             "/v1/messages",
@@ -453,7 +457,7 @@ async def test_openai_stop_rejected_with_structured_surfaces(surface: str) -> No
 
     app = create_app(settings(), registry=ChunkRegistry(["hello"]))
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
     ) as client:
         response = await client.post("/v1/codex/chat/completions", json=payload)
 
@@ -467,7 +471,7 @@ async def test_openai_stop_rejected_with_structured_surfaces(surface: str) -> No
 async def test_anthropic_stop_rejected_with_tools() -> None:
     app = create_app(settings(), registry=ChunkRegistry(["hello"]))
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
     ) as client:
         response = await client.post(
             "/v1/messages",

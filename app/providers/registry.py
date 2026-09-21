@@ -98,6 +98,15 @@ class ProviderRegistry:
         async with self._provider_slot(provider_name):
             return await self.get(provider_name).list_models()
 
+    async def accepts_model(self, provider_name: str, model: str) -> bool:
+        provider = self.get(provider_name)
+        if provider.accepts_model(model):
+            return True
+        if provider_name != "codex":
+            return False
+        async with self._provider_slot(provider_name):
+            return model in await provider.list_models()
+
     async def preflight(self, provider_name: str) -> RateLimitSnapshot | None:
         if self._closing:
             raise ProcessError("Kessel is shutting down")

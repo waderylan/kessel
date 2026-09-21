@@ -33,6 +33,9 @@ class FakeRegistry:
     async def rate_limit(self, provider_name: str):
         return None
 
+    async def accepts_model(self, provider_name: str, model: str) -> bool:
+        return True
+
     async def complete(
         self, provider_name: str, request: ChatCompletionRequest
     ) -> ProviderResult:
@@ -71,6 +74,7 @@ def make_settings(api_key: str | None = None) -> Settings:
         max_output_bytes=10_000,
         codex_command="codex",
         claude_command="claude",
+        allow_unauthenticated=api_key is None,
     )
 
 
@@ -78,7 +82,7 @@ def make_settings(api_key: str | None = None) -> Settings:
 async def test_chat_completion_uses_openai_shape() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         response = await client.post(
             "/v1/codex/chat/completions",
             json={
@@ -104,7 +108,7 @@ async def test_chat_completion_uses_openai_shape() -> None:
 async def test_reasoning_effort_defaults_to_low() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         response = await client.post(
             "/v1/codex/chat/completions",
             json={
@@ -120,7 +124,7 @@ async def test_reasoning_effort_defaults_to_low() -> None:
 async def test_streaming_uses_openai_sse_shape() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         response = await client.post(
             "/v1/claude/chat/completions",
             json={
@@ -141,7 +145,7 @@ async def test_streaming_uses_openai_sse_shape() -> None:
 async def test_configured_api_key_is_required() -> None:
     app = create_app(make_settings(api_key="secret"), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         unauthorized = await client.get("/v1/codex/models")
         authorized = await client.get(
             "/v1/codex/models",
@@ -161,7 +165,7 @@ async def test_configured_api_key_is_required() -> None:
 async def test_anthropic_auth_error_uses_anthropic_shape() -> None:
     app = create_app(make_settings(api_key="secret"), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         response = await client.post(
             "/v1/messages",
             headers={"x-api-key": "wrong"},
@@ -176,7 +180,7 @@ async def test_anthropic_auth_error_uses_anthropic_shape() -> None:
 async def test_unknown_provider_returns_404() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         response = await client.post(
             "/v1/unknown/chat/completions",
             json={
@@ -192,7 +196,7 @@ async def test_unknown_provider_returns_404() -> None:
 async def test_model_name_rejects_shell_metacharacters() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         response = await client.post(
             "/v1/codex/chat/completions",
             json={
@@ -209,7 +213,7 @@ async def test_model_name_rejects_shell_metacharacters() -> None:
 async def test_anthropic_messages_shape() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         response = await client.post(
             "/v1/messages",
             json={
@@ -232,7 +236,7 @@ async def test_anthropic_messages_shape() -> None:
 async def test_warm_claude_is_rejected_to_preserve_statelessness() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         response = await client.post(
             "/v1/claude/chat/completions",
             json={
@@ -256,7 +260,7 @@ async def test_unsupported_openai_controls_return_clear_400(
 ) -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         response = await client.post(
             "/v1/codex/chat/completions",
             json={
@@ -275,7 +279,7 @@ async def test_unsupported_openai_controls_return_clear_400(
 async def test_anthropic_errors_use_anthropic_shape() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         response = await client.post(
             "/v1/messages",
             json={
@@ -296,7 +300,7 @@ async def test_anthropic_errors_use_anthropic_shape() -> None:
 async def test_models_are_discovered_from_provider() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         response = await client.get("/v1/codex/models")
 
     assert response.status_code == 200
@@ -320,7 +324,7 @@ class LoggedOutRegistry(FakeRegistry):
 async def test_logged_out_provider_has_exact_repair_command() -> None:
     app = create_app(make_settings(), registry=LoggedOutRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         response = await client.post(
             "/v1/claude/chat/completions",
             json={
@@ -328,20 +332,34 @@ async def test_logged_out_provider_has_exact_repair_command() -> None:
                 "messages": [{"role": "user", "content": "x"}],
             },
         )
+        anthropic_response = await client.post(
+            "/v1/messages",
+            json={
+                "model": "default",
+                "messages": [{"role": "user", "content": "x"}],
+            },
+        )
 
     assert response.status_code == 503
+    assert response.json()["error"]["type"] == "server_error"
     assert response.json()["error"]["message"] == (
         "Claude Code isn't logged in. Run: claude login"
     )
+    assert anthropic_response.status_code == 503
+    assert anthropic_response.json()["error"]["type"] == "api_error"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("path", "payload", "anthropic"),
     [
-        (
-            "/v1/codex/chat/completions",
-            {"model": "default", "messages": [{"role": "user", "content": "x"}]},
+            (
+                "/v1/codex/chat/completions",
+                {
+                    "model": "default",
+                    "backend": "warm",
+                    "messages": [{"role": "user", "content": "x"}],
+                },
             False,
         ),
         (
@@ -356,7 +374,7 @@ async def test_rate_limit_is_a_real_429(
 ) -> None:
     app = create_app(make_settings(), registry=RateLimitedRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         response = await client.post(path, json=payload)
 
     assert response.status_code == 429

@@ -78,3 +78,22 @@ async def test_closing_stream_kills_child_process(tmp_path: Path) -> None:
     await stream.aclose()
     await asyncio.sleep(0.6)
     assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_stream_preserves_utf8_split_across_pipe_reads(tmp_path: Path) -> None:
+    script = tmp_path / "split_utf8.py"
+    script.write_text(
+        "import sys, time\n"
+        "payload = 'snowman ☃'.encode('utf-8')\n"
+        "sys.stdout.buffer.write(payload[:-1]); sys.stdout.buffer.flush()\n"
+        "time.sleep(0.05)\n"
+        "sys.stdout.buffer.write(payload[-1:] + b'\\n'); sys.stdout.buffer.flush()\n",
+        encoding="utf-8",
+    )
+    runner = ProcessRunner(timeout_seconds=5, max_output_bytes=1000)
+    stream = runner.stream_lines([sys.executable, str(script)], "", tmp_path)
+
+    assert await anext(stream) == "snowman ☃"
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)

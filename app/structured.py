@@ -6,6 +6,9 @@ import json
 import uuid
 from typing import Any
 
+from jsonschema.exceptions import ValidationError
+from jsonschema.validators import validator_for
+
 from app.models import ChatCompletionRequest, FunctionCall, ProviderResult, ToolCall
 from app.runner import ProcessError
 
@@ -51,6 +54,12 @@ def parse_structured_result(
         payload = json.loads(result.text)
     except json.JSONDecodeError as exc:
         raise ProcessError("provider returned invalid structured JSON") from exc
+    try:
+        validator_for(schema)(schema).validate(payload)
+    except ValidationError as exc:
+        raise ProcessError(
+            "provider returned structured output that does not match the schema"
+        ) from exc
 
     active_tools = request.tools if request.tool_choice != "none" else []
     if not active_tools:

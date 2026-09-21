@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import time
 from abc import ABC, abstractmethod
@@ -42,6 +43,7 @@ class ProviderAdapter(ABC):
                 command,
                 prompt,
                 cwd,
+                self.environment_overrides(request),
             )
         finally:
             await asyncio.to_thread(temporary.cleanup)
@@ -61,6 +63,14 @@ class ProviderAdapter(ABC):
     def observe_model(self, model: str) -> None:
         if model and model.lower() not in {"default", self.name}:
             self._observed_models.add(model)
+
+    def environment_overrides(
+        self, request: ChatCompletionRequest
+    ) -> dict[str, str] | None:
+        return None
+
+    def accepts_model(self, model: str) -> bool:
+        return uses_default_model(self.name, model) or model in self._observed_models
 
     def set_rate_limit(self, snapshot: RateLimitSnapshot | None) -> None:
         self._rate_limit = snapshot
@@ -108,4 +118,6 @@ def write_output_schema(request: ChatCompletionRequest, cwd: Path) -> Path | Non
         return None
     path = cwd / "output-schema.json"
     path.write_text(json.dumps(schema), encoding="utf-8")
+    if os.name != "nt":
+        path.chmod(0o600)
     return path

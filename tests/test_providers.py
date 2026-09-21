@@ -90,8 +90,14 @@ def test_claude_command_disables_tools_and_persistence() -> None:
     assert "--safe-mode" in command
     assert "--restricted" in command
     assert command[command.index("--tools") + 1] == ""
-    assert command[command.index("--effort") + 1] == "low"
-    assert command[command.index("--model") + 1] == "sonnet"
+    assert "--effort" not in command
+    assert "--model" not in command
+    assert ClaudeProvider("claude", runner()).environment_overrides(
+        request(model="sonnet", effort="low")
+    ) == {
+        "ANTHROPIC_MODEL": "sonnet",
+        "CLAUDE_CODE_EFFORT_LEVEL": "low",
+    }
     assert command[-1] == "-"
 
 
@@ -121,7 +127,7 @@ def test_claude_parser_extracts_message_and_usage() -> None:
 class ClaudeRetryRunner:
     timeout_seconds = 10
 
-    async def stream_lines(self, command, prompt, cwd):
+    async def stream_lines(self, command, prompt, cwd, env_overrides=None):
         yield json.dumps(
             {
                 "type": "system",
