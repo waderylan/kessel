@@ -69,11 +69,17 @@ python -m pip install -e ".[dev]"
 Start the server on localhost:
 
 ```powershell
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
 The local web client is available at `http://127.0.0.1:8000`. OpenAPI
 documentation is available at `http://127.0.0.1:8000/docs`.
+
+Kessel MUST run as one asynchronous Uvicorn worker. Provider semaphores,
+observed quota state, in-flight request tracking, and the warm Codex App Server
+are process-local. Multiple workers would create independent limits and warm
+servers, making concurrency and quota behavior inconsistent. Use async
+concurrency within the single worker instead of increasing Uvicorn workers.
 
 ## Authentication
 
@@ -376,6 +382,12 @@ Provider process failures, timeouts, missing executables, output-size limits,
 and subscription rate limits are mapped to provider-appropriate HTTP status
 codes.
 
+Each provider has an independent concurrency semaphore. A request MAY wait for
+a provider slot without blocking the event loop or the other provider. If the
+configured wait expires, Kessel returns `429` with `Retry-After`. OpenAI routes
+use error code `provider_busy`; `/v1/messages` uses Anthropic's
+`rate_limit_error` type. `/health` does not acquire a provider slot.
+
 ## Configuration
 
 | Environment variable | Default | Description |
@@ -383,8 +395,12 @@ codes.
 | `KESSEL_API_KEY` | Unset | Optional local API credential |
 | `KESSEL_CORS_ORIGINS` | Local port 8000 origins | Comma-separated allowed origins |
 | `KESSEL_REQUEST_TIMEOUT_SECONDS` | `300` | Provider request timeout |
-| `KESSEL_MAX_CONCURRENT_REQUESTS` | `2` | Shared provider concurrency limit |
+| `KESSEL_MAX_CONCURRENT_REQUESTS` | `2` | Fallback limit for each provider |
+| `KESSEL_CODEX_MAX_CONCURRENT_REQUESTS` | `2` | Codex concurrency limit |
+| `KESSEL_CLAUDE_MAX_CONCURRENT_REQUESTS` | `2` | Claude concurrency limit |
+| `KESSEL_PROVIDER_SLOT_WAIT_SECONDS` | `5` | Maximum wait for a provider slot |
 | `KESSEL_MAX_OUTPUT_BYTES` | `1048576` | Maximum provider stdout and stderr bytes |
+| `KESSEL_SHUTDOWN_GRACE_SECONDS` | `5` | Grace before active requests are cancelled |
 | `KESSEL_CODEX_COMMAND` | `codex` | Codex executable name or path |
 | `KESSEL_CLAUDE_COMMAND` | `claude` | Claude executable name or path |
 | `KESSEL_ENFORCE_CLI_VERSIONS` | `true` | Enforce tested CLI versions at startup |
@@ -393,8 +409,8 @@ Example:
 
 ```powershell
 $env:KESSEL_API_KEY = "replace-with-a-local-secret"
-$env:KESSEL_MAX_CONCURRENT_REQUESTS = "4"
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+$env:KESSEL_CODEX_MAX_CONCURRENT_REQUESTS = "4"
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
 ## Security properties
@@ -403,14 +419,23 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 - Kessel does not store request bodies or conversation history.
 - Request logs contain IDs, routes, status, and duration, not prompt content.
 - Provider processes receive request content over standard input.
-- Subprocesses are created with argument arrays and without shell
-  interpolation.
+- Subprocesses are created asynchronously in new process groups, with argument
+  arrays and without shell interpolation.
+- Standard output and standard error are drained concurrently. Kessel retains
+  at most 64 KiB of provider standard error for diagnostics.
 - Fresh Codex uses an ephemeral session and read-only sandbox.
 - Warm Codex uses an isolated runtime home containing only its authentication
   file.
 - Codex user rules, skills, MCP servers, apps, browser access, shell tools, and
   agent delegation are disabled.
 - Claude session persistence and built-in tools are disabled.
+- Client disconnects kill the fresh child process group or interrupt the warm
+  Codex turn.
+
+During shutdown, Uvicorn stops accepting new connections before application
+lifespan cleanup runs. Kessel waits for active requests for
+`KESSEL_SHUTDOWN_GRACE_SECONDS`, cancels remaining tasks, interrupts warm
+turns, and kills all remaining fresh-process groups before shutdown completes.
 
 Provider subprocesses inherit the current user's environment and use existing
 CLI authentication. Kessel is a local compatibility layer, not a security

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import time
 from abc import ABC, abstractmethod
@@ -29,13 +30,21 @@ class ProviderAdapter(ABC):
 
     async def complete(self, request: ChatCompletionRequest) -> ProviderResult:
         prompt = build_prompt(request)
-        with tempfile.TemporaryDirectory(prefix=f"kessel-{self.name}-") as directory:
-            cwd = Path(directory)
+        temporary = await asyncio.to_thread(
+            tempfile.TemporaryDirectory, prefix=f"kessel-{self.name}-"
+        )
+        try:
+            cwd = Path(temporary.name)
+            command = await asyncio.to_thread(
+                self.build_command, request, cwd
+            )
             result = await self.runner.run(
-                self.build_command(request, cwd),
+                command,
                 prompt,
                 cwd,
             )
+        finally:
+            await asyncio.to_thread(temporary.cleanup)
         parsed = self.parse_output(result.stdout, request.model)
         parsed = parse_structured_result(request, parsed)
         self.observe_model(parsed.model)

@@ -1,12 +1,14 @@
 import asyncio
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from app.models import ChatCompletionRequest
 from app.output_control import control_output_stream
 from app.providers.codex_app_server import CodexAppServer
+from app.runner import ProcessError
 
 
 class FakeAppServer(CodexAppServer):
@@ -102,3 +104,39 @@ def test_rate_limit_snapshot_uses_most_consumed_window() -> None:
     assert snapshot is not None
     assert snapshot.remaining_percent == 20
     assert snapshot.resets_at == 200
+
+
+class RestartProbeServer(CodexAppServer):
+    def __init__(self, instructions_path: Path) -> None:
+        super().__init__("codex", 2, instructions_path, ())
+        self.restart_count = 0
+        self.restarted = asyncio.Event()
+
+    async def _restart_once(self, process, generation: int) -> None:
+        self.restart_count += 1
+        self.restarted.set()
+
+
+@pytest.mark.asyncio
+async def test_app_server_death_fails_inflight_and_restarts_once(
+    tmp_path: Path,
+) -> None:
+    instructions = tmp_path / "instructions.txt"
+    instructions.write_text("test", encoding="utf-8")
+    server = RestartProbeServer(instructions)
+    stdout = asyncio.StreamReader()
+    process = SimpleNamespace(stdout=stdout)
+    pending = asyncio.get_running_loop().create_future()
+    queue: asyncio.Queue = asyncio.Queue()
+    server._pending[1] = pending
+    server._thread_queues["thread-1"] = queue
+    server._generation = 1
+
+    stdout.feed_eof()
+    await server._read_stdout(process, 1)
+    await server.restarted.wait()
+
+    with pytest.raises(ProcessError, match="exited unexpectedly"):
+        await pending
+    assert (await queue.get())["method"] == "server/error"
+    assert server.restart_count == 1

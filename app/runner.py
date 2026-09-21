@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import signal
+import subprocess
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -31,6 +33,10 @@ class ProviderRateLimitError(ProcessError):
     def __init__(self, message: str, retry_after_seconds: int | None = None) -> None:
         self.retry_after_seconds = retry_after_seconds
         super().__init__(message)
+
+
+class ProviderBusyError(ProviderRateLimitError):
+    """Raised when a provider concurrency slot is unavailable."""
 
 
 class ProcessExitError(ProcessError):
@@ -64,12 +70,29 @@ class ProcessResult:
     stderr: str
 
 
-class ProcessRunner:
-    """Run provider commands without a shell or command interpolation."""
+@dataclass(frozen=True)
+class _StreamCapture:
+    retained: bytes
+    total_bytes: int
 
-    def __init__(self, timeout_seconds: int, max_output_bytes: int) -> None:
+
+class ProcessRunner:
+    """Run provider commands asynchronously in independently killable groups."""
+
+    def __init__(
+        self,
+        timeout_seconds: int,
+        max_output_bytes: int,
+        stderr_retention_bytes: int = 65_536,
+    ) -> None:
         self.timeout_seconds = timeout_seconds
         self.max_output_bytes = max_output_bytes
+        self.stderr_retention_bytes = stderr_retention_bytes
+        self._processes: set[asyncio.subprocess.Process] = set()
+
+    @property
+    def active_process_count(self) -> int:
+        return len(self._processes)
 
     async def run(
         self,
@@ -77,51 +100,57 @@ class ProcessRunner:
         stdin_text: str,
         cwd: Path,
     ) -> ProcessResult:
-        env = os.environ.copy()
-        env["NO_COLOR"] = "1"
-        executable = shutil.which(command[0])
-        if executable is None:
-            raise ProcessNotFoundError(f"command not found: {command[0]}")
-        resolved_command = [executable, *command[1:]]
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *resolved_command,
-                cwd=str(cwd),
-                env=env,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError as exc:
-            raise ProcessNotFoundError(f"command not found: {command[0]}") from exc
+        process = await self._spawn(command, cwd)
+        assert process.stdout is not None
+        assert process.stderr is not None
 
+        stdout_task = asyncio.create_task(
+            self._drain_stream(process.stdout, self.max_output_bytes + 1)
+        )
+        stderr_task = asyncio.create_task(
+            self._drain_stream(process.stderr, self.stderr_retention_bytes)
+        )
+        stdin_task = asyncio.create_task(self._feed_stdin(process, stdin_text))
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(stdin_text.encode("utf-8")),
-                timeout=self.timeout_seconds,
+            try:
+                await asyncio.wait_for(process.wait(), timeout=self.timeout_seconds)
+                await stdin_task
+                stdout_capture, stderr_capture = await asyncio.gather(
+                    stdout_task, stderr_task
+                )
+            except asyncio.TimeoutError as exc:
+                await self._kill_process_group(process)
+                raise ProcessTimeoutError(
+                    f"provider exceeded {self.timeout_seconds} second timeout"
+                ) from exc
+            except asyncio.CancelledError:
+                await self._kill_process_group(process)
+                raise
+
+            if (
+                stdout_capture.total_bytes + stderr_capture.total_bytes
+                > self.max_output_bytes
+            ):
+                raise ProcessOutputLimitError(
+                    f"provider output exceeded {self.max_output_bytes} bytes"
+                )
+
+            stdout_text = stdout_capture.retained.decode(
+                "utf-8", errors="replace"
             )
-        except asyncio.TimeoutError as exc:
-            process.kill()
-            await process.wait()
-            raise ProcessTimeoutError(
-                f"provider exceeded {self.timeout_seconds} second timeout"
-            ) from exc
-        except asyncio.CancelledError:
+            stderr_text = stderr_capture.retained.decode(
+                "utf-8", errors="replace"
+            )
+            if process.returncode != 0:
+                raise ProcessExitError(
+                    process.returncode or 1, stderr_text.strip()
+                )
+            return ProcessResult(stdout=stdout_text, stderr=stderr_text)
+        finally:
+            await self._finish_tasks(stdin_task, stdout_task, stderr_task)
             if process.returncode is None:
-                process.kill()
-                await process.wait()
-            raise
-
-        if len(stdout) + len(stderr) > self.max_output_bytes:
-            raise ProcessOutputLimitError(
-                f"provider output exceeded {self.max_output_bytes} bytes"
-            )
-
-        stdout_text = stdout.decode("utf-8", errors="replace")
-        stderr_text = stderr.decode("utf-8", errors="replace")
-        if process.returncode != 0:
-            raise ProcessExitError(process.returncode or 1, stderr_text.strip())
-        return ProcessResult(stdout=stdout_text, stderr=stderr_text)
+                await self._kill_process_group(process)
+            self._processes.discard(process)
 
     async def stream_lines(
         self,
@@ -129,70 +158,172 @@ class ProcessRunner:
         stdin_text: str,
         cwd: Path,
     ) -> AsyncIterator[str]:
-        """Yield newline-delimited stdout while keeping process bounds."""
+        """Yield newline-delimited stdout while draining stderr concurrently."""
 
-        env = os.environ.copy()
-        env["NO_COLOR"] = "1"
-        executable = shutil.which(command[0])
-        if executable is None:
-            raise ProcessNotFoundError(f"command not found: {command[0]}")
-        process = await asyncio.create_subprocess_exec(
-            executable,
-            *command[1:],
-            cwd=str(cwd),
-            env=env,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        assert process.stdin is not None
+        process = await self._spawn(command, cwd)
         assert process.stdout is not None
         assert process.stderr is not None
-        process.stdin.write(stdin_text.encode("utf-8"))
-        await process.stdin.drain()
-        process.stdin.close()
 
         stderr_task = asyncio.create_task(
-            process.stderr.read(self.max_output_bytes + 1)
+            self._drain_stream(process.stderr, self.stderr_retention_bytes)
         )
-        output_bytes = 0
+        stdin_task = asyncio.create_task(self._feed_stdin(process, stdin_text))
+        stdout_bytes = 0
         started_at = time.monotonic()
         try:
-            while True:
-                remaining = self.timeout_seconds - (time.monotonic() - started_at)
+            try:
+                while True:
+                    remaining = self.timeout_seconds - (
+                        time.monotonic() - started_at
+                    )
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    line = await asyncio.wait_for(
+                        process.stdout.readline(), timeout=remaining
+                    )
+                    if not line:
+                        break
+                    stdout_bytes += len(line)
+                    if stdout_bytes > self.max_output_bytes:
+                        raise ProcessOutputLimitError(
+                            f"provider output exceeded {self.max_output_bytes} bytes"
+                        )
+                    yield line.decode(
+                        "utf-8", errors="replace"
+                    ).rstrip("\r\n")
+
+                remaining = self.timeout_seconds - (
+                    time.monotonic() - started_at
+                )
                 if remaining <= 0:
                     raise asyncio.TimeoutError
-                line = await asyncio.wait_for(process.stdout.readline(), remaining)
-                if not line:
-                    break
-                output_bytes += len(line)
-                if output_bytes > self.max_output_bytes:
+                await asyncio.wait_for(process.wait(), timeout=remaining)
+                await stdin_task
+                stderr_capture = await stderr_task
+                if stdout_bytes + stderr_capture.total_bytes > self.max_output_bytes:
                     raise ProcessOutputLimitError(
                         f"provider output exceeded {self.max_output_bytes} bytes"
                     )
-                yield line.decode("utf-8", errors="replace").rstrip("\r\n")
-
-            remaining = self.timeout_seconds - (time.monotonic() - started_at)
-            if remaining <= 0:
-                raise asyncio.TimeoutError
-            await asyncio.wait_for(process.wait(), remaining)
-            stderr = await stderr_task
-            if output_bytes + len(stderr) > self.max_output_bytes:
-                raise ProcessOutputLimitError(
-                    f"provider output exceeded {self.max_output_bytes} bytes"
-                )
-            if process.returncode != 0:
-                raise ProcessExitError(
-                    process.returncode or 1,
-                    stderr.decode("utf-8", errors="replace").strip(),
-                )
-        except asyncio.TimeoutError as exc:
-            raise ProcessTimeoutError(
-                f"provider exceeded {self.timeout_seconds} second timeout"
-            ) from exc
+                if process.returncode != 0:
+                    stderr = stderr_capture.retained.decode(
+                        "utf-8", errors="replace"
+                    ).strip()
+                    raise ProcessExitError(process.returncode or 1, stderr)
+            except asyncio.TimeoutError as exc:
+                await self._kill_process_group(process)
+                raise ProcessTimeoutError(
+                    f"provider exceeded {self.timeout_seconds} second timeout"
+                ) from exc
+            except asyncio.CancelledError:
+                await self._kill_process_group(process)
+                raise
         finally:
             if process.returncode is None:
+                await self._kill_process_group(process)
+            await self._finish_tasks(stdin_task, stderr_task)
+            self._processes.discard(process)
+
+    async def terminate_all(self) -> None:
+        """Kill and reap every child process still owned by this runner."""
+
+        await asyncio.gather(
+            *(self._kill_process_group(process) for process in tuple(self._processes)),
+            return_exceptions=True,
+        )
+        self._processes.clear()
+
+    async def _spawn(
+        self, command: list[str], cwd: Path
+    ) -> asyncio.subprocess.Process:
+        executable = await asyncio.to_thread(shutil.which, command[0])
+        if executable is None:
+            raise ProcessNotFoundError(f"command not found: {command[0]}")
+
+        process_options: dict[str, object] = {}
+        if os.name == "nt":
+            process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            process_options["start_new_session"] = True
+
+        env = os.environ.copy()
+        env["NO_COLOR"] = "1"
+        try:
+            process = await asyncio.create_subprocess_exec(
+                executable,
+                *command[1:],
+                cwd=str(cwd),
+                env=env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **process_options,
+            )
+        except FileNotFoundError as exc:
+            raise ProcessNotFoundError(
+                f"command not found: {command[0]}"
+            ) from exc
+        self._processes.add(process)
+        return process
+
+    @staticmethod
+    async def _feed_stdin(
+        process: asyncio.subprocess.Process, stdin_text: str
+    ) -> None:
+        if process.stdin is None:
+            return
+        try:
+            process.stdin.write(stdin_text.encode("utf-8"))
+            await process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            process.stdin.close()
+
+    @staticmethod
+    async def _drain_stream(
+        stream: asyncio.StreamReader, retain_bytes: int
+    ) -> _StreamCapture:
+        retained = bytearray()
+        total_bytes = 0
+        while chunk := await stream.read(65_536):
+            total_bytes += len(chunk)
+            retained.extend(chunk)
+            excess = len(retained) - retain_bytes
+            if excess > 0:
+                del retained[:excess]
+        return _StreamCapture(bytes(retained), total_bytes)
+
+    async def _kill_process_group(
+        self, process: asyncio.subprocess.Process
+    ) -> None:
+        if process.returncode is not None:
+            await process.wait()
+            return
+
+        if os.name == "nt":
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/PID",
+                str(process.pid),
+                "/T",
+                "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await killer.wait()
+            if process.returncode is None:
                 process.kill()
-                await process.wait()
-            if not stderr_task.done():
-                stderr_task.cancel()
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        await process.wait()
+
+    @staticmethod
+    async def _finish_tasks(*tasks: asyncio.Task) -> None:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)

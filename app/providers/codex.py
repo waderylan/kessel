@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from collections.abc import AsyncIterator
@@ -74,7 +75,7 @@ class CodexProvider(ProviderAdapter):
         prompt = build_prompt(request)
         final: ProviderResult | None = None
         app_stream = self.app_server.stream(
-            request, prompt, Path.cwd(), output_schema(request)
+            request, prompt, Path("."), output_schema(request)
         )
         async with aclosing(app_stream):
             async for event in app_stream:
@@ -140,7 +141,7 @@ class CodexProvider(ProviderAdapter):
             schema = output_schema(request)
             buffered_result: ProviderResult | None = None
             app_stream = self.app_server.stream(
-                request, prompt, Path.cwd(), schema
+                request, prompt, Path("."), schema
             )
             async with aclosing(app_stream):
                 async for event in app_stream:
@@ -165,10 +166,16 @@ class CodexProvider(ProviderAdapter):
         full_text = ""
         usage: TokenUsage | None = None
         completed = False
-        with tempfile.TemporaryDirectory(prefix="kessel-codex-") as directory:
-            cwd = Path(directory)
+        temporary = await asyncio.to_thread(
+            tempfile.TemporaryDirectory, prefix="kessel-codex-"
+        )
+        try:
+            cwd = Path(temporary.name)
+            command = await asyncio.to_thread(
+                self.build_command, request, cwd
+            )
             line_stream = self.runner.stream_lines(
-                self.build_command(request, cwd), prompt, cwd
+                command, prompt, cwd
             )
             async with aclosing(line_stream):
                 async for line in line_stream:
@@ -208,6 +215,8 @@ class CodexProvider(ProviderAdapter):
                         raise provider_error_from_message(
                             message or "Codex reported an error"
                         )
+        finally:
+            await asyncio.to_thread(temporary.cleanup)
 
         if not completed or not full_text:
             raise ProcessError("Codex completed without an assistant message")

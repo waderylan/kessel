@@ -43,9 +43,21 @@ class Settings:
     enforce_cli_versions: bool = True
     expected_codex_version: str = "0.155.1"
     expected_claude_version: str = "2.1.278"
+    codex_max_concurrent_requests: int | None = None
+    claude_max_concurrent_requests: int | None = None
+    provider_slot_wait_seconds: int = 5
+    shutdown_grace_seconds: int = 5
+
+    def provider_limit(self, provider: str) -> int:
+        configured = {
+            "codex": self.codex_max_concurrent_requests,
+            "claude": self.claude_max_concurrent_requests,
+        }.get(provider)
+        return configured or self.max_concurrent_requests
 
     @classmethod
     def from_environment(cls) -> "Settings":
+        shared_limit = _positive_int("KESSEL_MAX_CONCURRENT_REQUESTS", 2)
         origins = tuple(
             origin.strip()
             for origin in os.getenv(
@@ -60,13 +72,23 @@ class Settings:
             request_timeout_seconds=_positive_int(
                 "KESSEL_REQUEST_TIMEOUT_SECONDS", 300
             ),
-            max_concurrent_requests=_positive_int(
-                "KESSEL_MAX_CONCURRENT_REQUESTS", 2
-            ),
+            max_concurrent_requests=shared_limit,
             max_output_bytes=_positive_int("KESSEL_MAX_OUTPUT_BYTES", 1_048_576),
             codex_command=os.getenv("KESSEL_CODEX_COMMAND", "codex"),
             claude_command=os.getenv("KESSEL_CLAUDE_COMMAND", "claude"),
             enforce_cli_versions=_boolean("KESSEL_ENFORCE_CLI_VERSIONS", True),
+            codex_max_concurrent_requests=_positive_int(
+                "KESSEL_CODEX_MAX_CONCURRENT_REQUESTS", shared_limit
+            ),
+            claude_max_concurrent_requests=_positive_int(
+                "KESSEL_CLAUDE_MAX_CONCURRENT_REQUESTS", shared_limit
+            ),
+            provider_slot_wait_seconds=_positive_int(
+                "KESSEL_PROVIDER_SLOT_WAIT_SECONDS", 5
+            ),
+            shutdown_grace_seconds=_positive_int(
+                "KESSEL_SHUTDOWN_GRACE_SECONDS", 5
+            ),
         )
 
 

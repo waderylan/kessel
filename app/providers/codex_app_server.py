@@ -1,4 +1,4 @@
-"""Persistent Codex App Server client with ephemeral per-request threads."""
+"""Persistent Codex App Server client with isolated concurrent turns."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import asyncio
 import json
 import os
 import shutil
+import signal
+import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
@@ -27,7 +29,7 @@ from app.runner import (
 
 
 class CodexAppServer:
-    """Own one app-server process and isolate calls in new ephemeral threads."""
+    """Own one App Server and dispatch concurrent turns to isolated queues."""
 
     def __init__(
         self,
@@ -43,59 +45,63 @@ class CodexAppServer:
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
+        self._restart_task: asyncio.Task | None = None
         self._start_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._next_id = 1
         self._pending: dict[int, asyncio.Future] = {}
         self._thread_queues: dict[str, asyncio.Queue] = {}
-        self._stderr_tail = ""
+        self._turn_queues: dict[tuple[str, str], asyncio.Queue] = {}
+        self._stderr_tail = bytearray()
+        self._stderr_retention_bytes = 65_536
         self._runtime_directory: tempfile.TemporaryDirectory | None = None
+        self._instructions_text: str | None = None
         self._rate_limit: RateLimitSnapshot | None = None
+        self._closing = False
+        self._automatic_restart_used = False
+        self._generation = 0
 
     async def start(self) -> None:
+        restart = self._restart_task
+        current = asyncio.current_task()
+        if restart is not None and restart is not current and not restart.done():
+            await asyncio.shield(restart)
         if self._process is not None and self._process.returncode is None:
             return
+
         async with self._start_lock:
             if self._process is not None and self._process.returncode is None:
                 return
-            executable = shutil.which(self.command)
-            if executable is None:
-                raise ProcessNotFoundError(f"command not found: {self.command}")
-            self._runtime_directory = tempfile.TemporaryDirectory(
-                prefix="kessel-codex-server-"
-            )
-            runtime_path = Path(self._runtime_directory.name)
-            isolated_home = runtime_path / "home"
-            isolated_home.mkdir()
-            source_home = Path(
-                os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
-            )
-            auth_path = source_home / "auth.json"
-            if auth_path.exists():
-                shutil.copy2(auth_path, isolated_home / "auth.json")
+            if self._closing:
+                raise ProcessError("Codex App Server is shutting down")
 
-            command = [
-                executable,
-                "app-server",
-                "--stdio",
-                "--config",
-                f'model_instructions_file={json.dumps(self.instructions_path.as_posix())}',
-                "--config",
-                "skills.max_context_tokens=1",
-                "--config",
-                "agents.enabled=false",
-                "--config",
-                "mcp_servers={}",
-                "--config",
-                'model_reasoning_summary="none"',
-                "--config",
-                'model_verbosity="low"',
-            ]
-            for feature in self.disabled_features:
-                command.extend(["--disable", feature])
+            await self._cleanup_runtime()
+            executable = await asyncio.to_thread(shutil.which, self.command)
+            if executable is None:
+                raise ProcessNotFoundError(
+                    f"command not found: {self.command}"
+                )
+
+            (
+                self._runtime_directory,
+                runtime_path,
+                isolated_home,
+                self._instructions_text,
+            ) = await asyncio.to_thread(self._prepare_runtime)
+            command = self._build_command(executable)
             env = os.environ.copy()
             env["NO_COLOR"] = "1"
             env["CODEX_HOME"] = str(isolated_home)
+            process_options: dict[str, object] = {}
+            if os.name == "nt":
+                process_options["creationflags"] = (
+                    subprocess.CREATE_NEW_PROCESS_GROUP
+                )
+            else:
+                process_options["start_new_session"] = True
+
+            self._generation += 1
+            generation = self._generation
             self._process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=str(runtime_path),
@@ -103,51 +109,58 @@ class CodexAppServer:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **process_options,
             )
-            self._reader_task = asyncio.create_task(self._read_stdout())
-            self._stderr_task = asyncio.create_task(self._read_stderr())
-            await self._request(
-                "initialize",
-                {
-                    "clientInfo": {
-                        "name": "kessel_local_api",
-                        "title": "Kessel Local API",
-                        "version": "0.2.0",
-                    }
-                },
+            process = self._process
+            self._reader_task = asyncio.create_task(
+                self._read_stdout(process, generation)
             )
-            await self._notify("initialized", {})
+            self._stderr_task = asyncio.create_task(
+                self._read_stderr(process)
+            )
+            try:
+                await self._request(
+                    "initialize",
+                    {
+                        "clientInfo": {
+                            "name": "kessel_local_api",
+                            "title": "Kessel Local API",
+                            "version": "0.2.0",
+                        }
+                    },
+                )
+                await self._notify("initialized", {})
+            except BaseException:
+                await self._stop_process(process)
+                raise
 
     async def close(self) -> None:
+        self._closing = True
+        restart = self._restart_task
+        if restart is not None and not restart.done():
+            restart.cancel()
+            await asyncio.gather(restart, return_exceptions=True)
+        self._restart_task = None
+
         process = self._process
         self._process = None
-        if process is not None and process.returncode is None:
-            if process.stdin is not None:
-                process.stdin.close()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=3)
-            except asyncio.TimeoutError:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=2)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
+        if process is not None:
+            await self._stop_process(process)
+
         tasks = [
             task
             for task in (self._reader_task, self._stderr_task)
-            if task is not None
+            if task is not None and task is not asyncio.current_task()
         ]
         for task in tasks:
-            if task is not None and not task.done():
+            if not task.done():
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._reader_task = None
         self._stderr_task = None
-        if self._runtime_directory is not None:
-            self._runtime_directory.cleanup()
-            self._runtime_directory = None
+        self._fail_inflight(ProcessError("Codex App Server shut down"))
+        await self._cleanup_runtime()
 
     async def stream(
         self,
@@ -157,12 +170,17 @@ class CodexAppServer:
         schema: dict | None,
     ) -> AsyncIterator[ProviderStreamEvent]:
         await self.start()
+        if self._instructions_text is None:
+            self._instructions_text = await asyncio.to_thread(
+                self.instructions_path.read_text, encoding="utf-8"
+            )
+        assert self._runtime_directory is not None
         thread_params: dict[str, object] = {
-            "cwd": str(Path(self._runtime_directory.name).resolve()),
+            "cwd": self._runtime_directory.name,
             "approvalPolicy": "never",
             "sandbox": "read-only",
             "ephemeral": True,
-            "baseInstructions": self.instructions_path.read_text(encoding="utf-8"),
+            "baseInstructions": self._instructions_text,
             "serviceName": "kessel",
             "serviceTier": request.service_tier,
             "config": {
@@ -177,7 +195,9 @@ class CodexAppServer:
         try:
             thread_id = response["thread"]["id"]
         except (KeyError, TypeError) as exc:
-            raise ProcessError("Codex App Server returned no thread id") from exc
+            raise ProcessError(
+                "Codex App Server returned no thread id"
+            ) from exc
 
         queue: asyncio.Queue = asyncio.Queue()
         self._thread_queues[thread_id] = queue
@@ -195,6 +215,7 @@ class CodexAppServer:
         usage: TokenUsage | None = None
         turn_id: str | None = None
         turn_completed = False
+        deadline = asyncio.get_running_loop().time() + self.timeout_seconds
         try:
             turn_response = await self._request("turn/start", turn_params)
             raw_turn = turn_response.get("turn", {})
@@ -202,10 +223,16 @@ class CodexAppServer:
                 raw_turn_id = raw_turn.get("id")
                 if isinstance(raw_turn_id, str):
                     turn_id = raw_turn_id
+                    self._turn_queues[(thread_id, turn_id)] = queue
             while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise ProcessTimeoutError(
+                        f"provider exceeded {self.timeout_seconds} second timeout"
+                    )
                 try:
                     message = await asyncio.wait_for(
-                        queue.get(), timeout=self.timeout_seconds
+                        queue.get(), timeout=remaining
                     )
                 except asyncio.TimeoutError as exc:
                     raise ProcessTimeoutError(
@@ -227,7 +254,7 @@ class CodexAppServer:
                             yield ProviderStreamEvent(delta=text)
                 elif method == "thread/tokenUsage/updated":
                     usage = self._parse_usage(params.get("tokenUsage"))
-                elif method == "error":
+                elif method in {"error", "server/error"}:
                     error = params.get("error", {})
                     message_text = error.get("message") or "Codex turn failed"
                     raise provider_error_from_message(message_text)
@@ -241,6 +268,8 @@ class CodexAppServer:
                     break
         finally:
             self._thread_queues.pop(thread_id, None)
+            if turn_id is not None:
+                self._turn_queues.pop((thread_id, turn_id), None)
             if turn_id is not None and not turn_completed:
                 interrupt = asyncio.create_task(
                     self._request(
@@ -249,9 +278,26 @@ class CodexAppServer:
                     )
                 )
                 try:
-                    await asyncio.shield(interrupt)
+                    await asyncio.wait_for(
+                        asyncio.shield(interrupt),
+                        timeout=min(2, self.timeout_seconds),
+                    )
+                except asyncio.TimeoutError:
+                    interrupt.cancel()
+                    await asyncio.gather(interrupt, return_exceptions=True)
                 except asyncio.CancelledError:
-                    await interrupt
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(interrupt),
+                            timeout=min(2, self.timeout_seconds),
+                        )
+                    except asyncio.TimeoutError:
+                        interrupt.cancel()
+                        await asyncio.gather(
+                            interrupt, return_exceptions=True
+                        )
+                    except ProcessError:
+                        pass
                     raise
                 except ProcessError:
                     pass
@@ -295,14 +341,17 @@ class CodexAppServer:
         self._next_id += 1
         future = loop.create_future()
         self._pending[request_id] = future
-        await self._write({"method": method, "id": request_id, "params": params})
         try:
+            await self._write(
+                {"method": method, "id": request_id, "params": params}
+            )
             response = await asyncio.wait_for(future, self.timeout_seconds)
         except asyncio.TimeoutError as exc:
-            self._pending.pop(request_id, None)
             raise ProcessTimeoutError(
                 f"Codex App Server did not answer {method}"
             ) from exc
+        finally:
+            self._pending.pop(request_id, None)
         if "error" in response:
             error = response["error"]
             raise ProcessError(error.get("message") or f"{method} failed")
@@ -316,18 +365,25 @@ class CodexAppServer:
         assert self._process is not None and self._process.stdin is not None
         data = (json.dumps(payload, separators=(",", ":")) + "\n").encode()
         async with self._write_lock:
-            self._process.stdin.write(data)
-            await self._process.stdin.drain()
+            try:
+                self._process.stdin.write(data)
+                await self._process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError) as exc:
+                raise ProcessError("Codex App Server closed stdin") from exc
 
     async def _ensure_running(self) -> None:
         if self._process is None or self._process.returncode is not None:
-            detail = f": {self._stderr_tail}" if self._stderr_tail else ""
-            raise ProcessError(f"Codex App Server is not running{detail}")
+            detail = self._stderr_text()
+            suffix = f": {detail}" if detail else ""
+            raise ProcessError(f"Codex App Server is not running{suffix}")
 
-    async def _read_stdout(self) -> None:
-        assert self._process is not None and self._process.stdout is not None
+    async def _read_stdout(
+        self, process: asyncio.subprocess.Process, generation: int
+    ) -> None:
+        assert process.stdout is not None
+        error: ProcessError | None = None
         try:
-            while line := await self._process.stdout.readline():
+            while line := await process.stdout.readline():
                 try:
                     message = json.loads(line)
                 except json.JSONDecodeError:
@@ -340,25 +396,163 @@ class CodexAppServer:
                     continue
                 params = message.get("params", {})
                 if message.get("method") == "account/rateLimits/updated":
-                    raw_limits = params.get("rateLimits") if isinstance(params, dict) else None
+                    raw_limits = (
+                        params.get("rateLimits")
+                        if isinstance(params, dict)
+                        else None
+                    )
                     self._rate_limit = self._parse_rate_limit(raw_limits)
                     continue
-                thread_id = params.get("threadId") if isinstance(params, dict) else None
-                queue = self._thread_queues.get(thread_id)
+                if not isinstance(params, dict):
+                    continue
+                thread_id = params.get("threadId")
+                turn_id = params.get("turnId")
+                if not isinstance(turn_id, str):
+                    raw_turn = params.get("turn")
+                    if isinstance(raw_turn, dict):
+                        turn_id = raw_turn.get("id")
+                queue = None
+                if isinstance(thread_id, str) and isinstance(turn_id, str):
+                    queue = self._turn_queues.get((thread_id, turn_id))
+                if queue is None and isinstance(thread_id, str):
+                    queue = self._thread_queues.get(thread_id)
                 if queue is not None:
                     queue.put_nowait(message)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            error = ProcessError(f"Codex App Server reader failed: {exc}")
         finally:
-            error = ProcessError("Codex App Server exited unexpectedly")
-            for future in self._pending.values():
-                if not future.done():
-                    future.set_exception(error)
-            self._pending.clear()
+            if self._closing or generation != self._generation:
+                return
+            error = error or ProcessError(
+                "Codex App Server exited unexpectedly"
+            )
+            self._fail_inflight(error)
+            if not self._automatic_restart_used:
+                self._automatic_restart_used = True
+                self._restart_task = asyncio.create_task(
+                    self._restart_once(process, generation)
+                )
 
-    async def _read_stderr(self) -> None:
-        assert self._process is not None and self._process.stderr is not None
-        while chunk := await self._process.stderr.read(4096):
-            text = chunk.decode("utf-8", errors="replace")
-            self._stderr_tail = (self._stderr_tail + text)[-4000:]
+    async def _read_stderr(self, process: asyncio.subprocess.Process) -> None:
+        assert process.stderr is not None
+        while chunk := await process.stderr.read(65_536):
+            self._stderr_tail.extend(chunk)
+            excess = len(self._stderr_tail) - self._stderr_retention_bytes
+            if excess > 0:
+                del self._stderr_tail[:excess]
+
+    async def _restart_once(
+        self, process: asyncio.subprocess.Process, generation: int
+    ) -> None:
+        try:
+            await self._stop_process(process)
+            if self._closing or generation != self._generation:
+                return
+            await self.start()
+        except (ProcessError, OSError):
+            return
+
+    def _fail_inflight(self, error: ProcessError) -> None:
+        for future in tuple(self._pending.values()):
+            if not future.done():
+                future.set_exception(error)
+        self._pending.clear()
+        message = {
+            "method": "server/error",
+            "params": {"error": {"message": str(error)}},
+        }
+        queues = {
+            *self._thread_queues.values(),
+            *self._turn_queues.values(),
+        }
+        for queue in queues:
+            queue.put_nowait(message)
+
+    def _prepare_runtime(
+        self,
+    ) -> tuple[tempfile.TemporaryDirectory, Path, Path, str]:
+        temporary = tempfile.TemporaryDirectory(
+            prefix="kessel-codex-server-"
+        )
+        try:
+            runtime_path = Path(temporary.name)
+            isolated_home = runtime_path / "home"
+            isolated_home.mkdir()
+            source_home = Path(
+                os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+            )
+            auth_path = source_home / "auth.json"
+            if auth_path.exists():
+                shutil.copy2(auth_path, isolated_home / "auth.json")
+            instructions = self.instructions_path.read_text(encoding="utf-8")
+            return temporary, runtime_path, isolated_home, instructions
+        except BaseException:
+            temporary.cleanup()
+            raise
+
+    def _build_command(self, executable: str) -> list[str]:
+        command = [
+            executable,
+            "app-server",
+            "--stdio",
+            "--config",
+            f'model_instructions_file={json.dumps(self.instructions_path.as_posix())}',
+            "--config",
+            "skills.max_context_tokens=1",
+            "--config",
+            "agents.enabled=false",
+            "--config",
+            "mcp_servers={}",
+            "--config",
+            'model_reasoning_summary="none"',
+            "--config",
+            'model_verbosity="low"',
+        ]
+        for feature in self.disabled_features:
+            command.extend(["--disable", feature])
+        return command
+
+    async def _stop_process(self, process: asyncio.subprocess.Process) -> None:
+        if process.returncode is not None:
+            await process.wait()
+            return
+        if process.stdin is not None:
+            process.stdin.close()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=1)
+            return
+        except asyncio.TimeoutError:
+            pass
+        if os.name == "nt":
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/PID",
+                str(process.pid),
+                "/T",
+                "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await killer.wait()
+            if process.returncode is None:
+                process.kill()
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        await process.wait()
+
+    async def _cleanup_runtime(self) -> None:
+        if self._runtime_directory is not None:
+            temporary = self._runtime_directory
+            self._runtime_directory = None
+            await asyncio.to_thread(temporary.cleanup)
+
+    def _stderr_text(self) -> str:
+        return bytes(self._stderr_tail).decode("utf-8", errors="replace").strip()
 
     @staticmethod
     def _parse_usage(raw_usage: object) -> TokenUsage | None:
@@ -388,7 +582,9 @@ class CodexAppServer:
         ]
         if not windows:
             return None
-        limiting_window = max(windows, key=lambda item: float(item.get("usedPercent", 0)))
+        limiting_window = max(
+            windows, key=lambda item: float(item.get("usedPercent", 0))
+        )
         used_percent = float(limiting_window.get("usedPercent", 0))
         if raw_limits.get("rateLimitReachedType") is not None:
             used_percent = 100.0

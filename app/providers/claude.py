@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import time
@@ -96,8 +97,11 @@ class ClaudeProvider(ProviderAdapter):
         prompt = build_prompt(request)
         full_text = ""
         final_result: ProviderResult | None = None
-        with tempfile.TemporaryDirectory(prefix="kessel-claude-") as directory:
-            cwd = Path(directory)
+        temporary = await asyncio.to_thread(
+            tempfile.TemporaryDirectory, prefix="kessel-claude-"
+        )
+        try:
+            cwd = Path(temporary.name)
             command = self.build_command(request, cwd)
             output_index = command.index("json")
             command[output_index] = "stream-json"
@@ -171,6 +175,8 @@ class ClaudeProvider(ProviderAdapter):
                             usage=self._parse_usage(event.get("usage")),
                         )
                         self.set_rate_limit(None)
+        finally:
+            await asyncio.to_thread(temporary.cleanup)
 
         if final_result is None or not final_result.text:
             raise ProcessError("Claude completed without an assistant message")

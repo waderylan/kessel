@@ -40,6 +40,7 @@ from app.runner import (
     ProcessOutputLimitError,
     ProcessRunner,
     ProcessTimeoutError,
+    ProviderBusyError,
     ProviderRateLimitError,
 )
 from app.versioning import verify_cli_versions
@@ -60,7 +61,12 @@ def create_registry(app_settings: Settings) -> ProviderRegistry:
             "codex": CodexProvider(app_settings.codex_command, runner),
             "claude": ClaudeProvider(app_settings.claude_command, runner),
         },
-        max_concurrent_requests=app_settings.max_concurrent_requests,
+        max_concurrent_requests={
+            "codex": app_settings.provider_limit("codex"),
+            "claude": app_settings.provider_limit("claude"),
+        },
+        slot_wait_seconds=app_settings.provider_slot_wait_seconds,
+        shutdown_grace_seconds=app_settings.shutdown_grace_seconds,
     )
 
 
@@ -328,7 +334,9 @@ def create_app(
 
     @application.exception_handler(ProcessError)
     async def provider_error_handler(request: Request, exc: ProcessError) -> JSONResponse:
-        if isinstance(exc, ProviderRateLimitError):
+        if isinstance(exc, ProviderBusyError):
+            status_code, code = 429, "provider_busy"
+        elif isinstance(exc, ProviderRateLimitError):
             status_code, code = 429, "rate_limit_exceeded"
         elif isinstance(exc, ProcessNotFoundError):
             status_code, code = 503, "provider_not_installed"
@@ -349,7 +357,10 @@ def create_app(
         if isinstance(exc, ProcessExitError) and exc.stderr:
             message = f"{message}: {exc.stderr[-1000:]}"
         headers = None
-        if isinstance(exc, ProviderRateLimitError):
+        if isinstance(exc, ProviderBusyError):
+            retry_after = str(max(1, exc.retry_after_seconds or 1))
+            headers = {"retry-after": retry_after}
+        elif isinstance(exc, ProviderRateLimitError):
             headers = {
                 "ratelimit-limit": "100",
                 "ratelimit-remaining": "0",
@@ -368,9 +379,10 @@ def create_app(
         provider_status = {}
         for name in application.state.registry.names:
             command = application.state.registry.get(name).command
+            executable = await asyncio.to_thread(shutil.which, command)
             provider_status[name] = {
                 "command": command,
-                "available": shutil.which(command) is not None,
+                "available": executable is not None,
                 "version": (
                     application.state.cli_versions[name].actual
                     if name in application.state.cli_versions
@@ -456,6 +468,37 @@ def create_app(
             raise ProcessError("provider stream ended without a result")
         return final_result
 
+    async def await_or_disconnect(operation, raw_request: Request):
+        operation_task = asyncio.create_task(operation)
+
+        async def watch_disconnect() -> None:
+            while not operation_task.done():
+                if await raw_request.is_disconnected():
+                    return
+                await asyncio.sleep(0.05)
+
+        disconnect_task = asyncio.create_task(watch_disconnect())
+        try:
+            done, _ = await asyncio.wait(
+                {operation_task, disconnect_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except BaseException:
+            operation_task.cancel()
+            disconnect_task.cancel()
+            await asyncio.gather(
+                operation_task, disconnect_task, return_exceptions=True
+            )
+            raise
+        if operation_task in done:
+            disconnect_task.cancel()
+            await asyncio.gather(disconnect_task, return_exceptions=True)
+            return await operation_task
+
+        operation_task.cancel()
+        await asyncio.gather(operation_task, return_exceptions=True)
+        raise HTTPException(status_code=499, detail="Client disconnected")
+
     async def preflight_headers(provider: str) -> dict[str, str]:
         snapshot = await application.state.registry.preflight(provider)
         return snapshot.headers() if snapshot is not None else {}
@@ -516,7 +559,9 @@ def create_app(
             created = int(time.time())
             provider_stream = controlled_provider_stream(provider, body)
             try:
-                first_provider_event = await anext(provider_stream)
+                first_provider_event = await await_or_disconnect(
+                    anext(provider_stream), raw_request
+                )
             except StopAsyncIteration as exc:
                 raise ProcessError("provider stream ended without a result") from exc
             except BaseException:
@@ -549,12 +594,15 @@ def create_app(
                 try:
                     async def provider_events():
                         yield first_provider_event
-                        async for remaining_event in provider_stream:
-                            yield remaining_event
+                        while True:
+                            try:
+                                yield await await_or_disconnect(
+                                    anext(provider_stream), raw_request
+                                )
+                            except StopAsyncIteration:
+                                return
 
                     async for event in provider_events():
-                        if await raw_request.is_disconnected():
-                            return
                         if event.delta:
                             emitted_content = True
                             yield encode(chunk({"content": event.delta}))
@@ -621,7 +669,9 @@ def create_app(
                 },
             )
 
-        result = await controlled_completion(provider, body)
+        result = await await_or_disconnect(
+            controlled_completion(provider, body), raw_request
+        )
         finish_reason = (
             result.finish_reason
             or ("tool_calls" if result.tool_calls else "stop")
@@ -676,7 +726,9 @@ def create_app(
         if body.stream:
             provider_stream = controlled_provider_stream("claude", chat_request)
             try:
-                first_provider_event = await anext(provider_stream)
+                first_provider_event = await await_or_disconnect(
+                    anext(provider_stream), raw_request
+                )
             except StopAsyncIteration as exc:
                 raise ProcessError("provider stream ended without a result") from exc
             except BaseException:
@@ -709,12 +761,15 @@ def create_app(
                 try:
                     async def provider_events():
                         yield first_provider_event
-                        async for remaining_event in provider_stream:
-                            yield remaining_event
+                        while True:
+                            try:
+                                yield await await_or_disconnect(
+                                    anext(provider_stream), raw_request
+                                )
+                            except StopAsyncIteration:
+                                return
 
                     async for event in provider_events():
-                        if await raw_request.is_disconnected():
-                            return
                         if event.delta:
                             if not block_started:
                                 block_started = True
@@ -838,7 +893,9 @@ def create_app(
                 },
             )
 
-        result = await controlled_completion("claude", chat_request)
+        result = await await_or_disconnect(
+            controlled_completion("claude", chat_request), raw_request
+        )
         usage = result.usage
         if result.tool_calls:
             tool = result.tool_calls[0]

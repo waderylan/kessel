@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import re
-import shutil
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.config import Settings
+from app.runner import ProcessError, ProcessRunner
 
 
 class UnsupportedCliVersionError(RuntimeError):
@@ -31,21 +32,12 @@ def parse_version(output: str) -> str:
 
 
 async def _read_version(command: str, expected: str) -> CliVersion:
-    executable = shutil.which(command)
-    if executable is None:
-        raise UnsupportedCliVersionError(f"required command not found: {command}")
-    process = await asyncio.create_subprocess_exec(
-        executable,
-        "--version",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
-    output = (stdout + stderr).decode("utf-8", errors="replace")
-    if process.returncode != 0:
-        raise UnsupportedCliVersionError(
-            f"{command} --version exited with code {process.returncode}"
-        )
+    runner = ProcessRunner(timeout_seconds=10, max_output_bytes=65_536)
+    try:
+        result = await runner.run([command, "--version"], "", Path("."))
+    except ProcessError as exc:
+        raise UnsupportedCliVersionError(str(exc)) from exc
+    output = result.stdout + result.stderr
     return CliVersion(command=command, expected=expected, actual=parse_version(output))
 
 
