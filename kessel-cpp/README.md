@@ -85,8 +85,8 @@ mock workload. These numbers isolate gateway/process overhead and do not claim
 that model inference is faster by the same percentage. Machine-readable results are in
 `benchmark-results/results.json`.
 
-Python bugs and candidate backports found during the port are tracked in
-`PYTHON_BUILD_LIST.md`. No Python source was changed.
+Python bugs and candidate backports are tracked in `PYTHON_BUILD_LIST.md`.
+Python capabilities without C++ parity are tracked in `PARITY_GAPS.md`.
 
 ## Verification scope
 
