@@ -9,6 +9,14 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.providers.compatibility import (
+    MINIMUM_VERSIONS,
+    UnsupportedCliVersionError,
+    capability_probes,
+    missing_capabilities,
+    parse_version,
+    require_minimum_version,
+)
 from app.user_config import UserConfig
 
 
@@ -21,10 +29,11 @@ class ProviderHealth:
     version: str | None = None
     detail: str | None = None
     executable: str | None = None
+    compatible: bool = True
 
     @property
     def working(self) -> bool:
-        return self.installed and self.authenticated
+        return self.installed and self.authenticated and self.compatible
 
     @property
     def fix_command(self) -> str | None:
@@ -32,6 +41,18 @@ class ProviderHealth:
             return {
                 "codex": "npm install -g @openai/codex",
                 "claude": "npm install -g @anthropic-ai/claude-code",
+            }[self.name]
+        if not self.compatible:
+            return {
+                "codex": (
+                    "npm install -g "
+                    f"@openai/codex@{MINIMUM_VERSIONS['codex']}"
+                ),
+                "claude": (
+                    "npm install -g "
+                    "@anthropic-ai/claude-code@"
+                    f"{MINIMUM_VERSIONS['claude']}"
+                ),
             }[self.name]
         if not self.authenticated:
             return {"codex": "codex login", "claude": "claude login"}[self.name]
@@ -90,10 +111,37 @@ def _check_provider(
     executable = _resolve_executable(command)
     if executable is None:
         return ProviderHealth(name, display_name, False, False)
+    version = None
     try:
         version_result = _run([executable, "--version"])
-        version = (version_result.stdout or version_result.stderr).strip() or None
+        version_output = version_result.stdout + version_result.stderr
+        version = parse_version(version_output)
+        require_minimum_version(version, MINIMUM_VERSIONS[name])
+        for index, probe in enumerate(capability_probes(name)):
+            help_result = _run([executable, *probe.args])
+            if help_result.returncode != 0:
+                raise UnsupportedCliVersionError(
+                    f"capability check failed: {' '.join(probe.args)}"
+                )
+            missing = missing_capabilities(
+                name, help_result.stdout + help_result.stderr, index
+            )
+            if missing:
+                raise UnsupportedCliVersionError(
+                    "missing required capabilities: " + ", ".join(missing)
+                )
         auth_result = _run([executable, *auth_args])
+    except UnsupportedCliVersionError as exc:
+        return ProviderHealth(
+            name,
+            display_name,
+            True,
+            False,
+            version=version,
+            detail=str(exc),
+            executable=executable,
+            compatible=False,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return ProviderHealth(
             name,

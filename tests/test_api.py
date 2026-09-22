@@ -12,7 +12,11 @@ from app.models import (
     ProviderStreamEvent,
     TokenUsage,
 )
-from app.runner import ProviderAuthenticationError, ProviderRateLimitError
+from app.runner import (
+    ProviderAuthenticationError,
+    ProviderCompatibilityError,
+    ProviderRateLimitError,
+)
 
 
 class FakeProvider:
@@ -425,6 +429,31 @@ class RateLimitedRegistry(FakeRegistry):
 class LoggedOutRegistry(FakeRegistry):
     async def preflight(self, provider_name: str):
         raise ProviderAuthenticationError(provider_name, "not logged in")
+
+
+class IncompatibleRegistry(FakeRegistry):
+    async def accepts_model(self, provider_name: str, model: str) -> bool:
+        raise ProviderCompatibilityError(provider_name)
+
+
+@pytest.mark.asyncio
+async def test_incompatible_provider_returns_repairable_error() -> None:
+    app = create_app(make_settings(), registry=IncompatibleRegistry())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8000"
+    ) as client:
+        response = await client.post(
+            "/v1/codex/chat/completions",
+            json={
+                "model": "default",
+                "messages": [{"role": "user", "content": "x"}],
+            },
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "provider_incompatible"
+    assert "kessel doctor" in response.json()["error"]["message"]
 
 
 @pytest.mark.asyncio

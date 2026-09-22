@@ -15,7 +15,12 @@ from app.models import (
 )
 from app.providers.base import ProviderAdapter
 from app.rate_limits import RateLimitSnapshot
-from app.runner import ProcessError, ProcessNotFoundError, ProviderBusyError
+from app.runner import (
+    ProcessError,
+    ProcessNotFoundError,
+    ProviderBusyError,
+    ProviderCompatibilityError,
+)
 
 
 class ProviderRegistry:
@@ -40,13 +45,25 @@ class ProviderRegistry:
         self._shutdown_grace_seconds = shutdown_grace_seconds
         self._inflight: set[asyncio.Task] = set()
         self._closing = False
+        self._disabled: set[str] = set()
 
     @property
     def names(self) -> tuple[str, ...]:
         return tuple(self._providers)
 
     def get(self, name: str) -> ProviderAdapter:
+        if name in self._disabled:
+            raise ProviderCompatibilityError(name)
         return self._providers[name]
+
+    def command(self, name: str) -> str:
+        return self._providers[name].command
+
+    def disable(self, names: set[str]) -> None:
+        self._disabled.update(names)
+
+    def is_enabled(self, name: str) -> bool:
+        return name not in self._disabled
 
     @asynccontextmanager
     async def _provider_slot(self, provider_name: str):

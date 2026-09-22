@@ -109,6 +109,12 @@ def _print_doctor(checks: Sequence[ProviderHealth]) -> None:
         elif not check.installed:
             print(f"[fix] {check.display_name} is not installed.")
             print(f"      Run: {check.fix_command}")
+        elif not check.compatible:
+            suffix = f" ({check.version})" if check.version else ""
+            print(f"[fix] {check.display_name} is incompatible{suffix}.")
+            if check.detail:
+                print(f"      {check.detail}")
+            print(f"      Run: {check.fix_command}")
         else:
             print(f"[fix] {check.display_name} isn't logged in.")
             print(f"      Run: {check.fix_command}")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from app.providers.compatibility import MINIMUM_VERSIONS
 from app.user_config import UserConfig
 
 
@@ -43,8 +44,8 @@ class Settings:
     codex_command: str
     claude_command: str
     enforce_cli_versions: bool = True
-    expected_codex_version: str = "0.155.1"
-    expected_claude_version: str = "2.1.278"
+    minimum_codex_version: str = MINIMUM_VERSIONS["codex"]
+    minimum_claude_version: str = MINIMUM_VERSIONS["claude"]
     codex_max_concurrent_requests: int | None = None
     claude_max_concurrent_requests: int | None = None
     provider_slot_wait_seconds: int = 5

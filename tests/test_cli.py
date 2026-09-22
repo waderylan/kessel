@@ -63,6 +63,27 @@ def test_unknown_connect_target_gets_generic_pair(configured: UserConfig) -> Non
     assert "API key: kessel_test_real_key" in output
 
 
+def test_doctor_reports_incompatible_provider(monkeypatch, capsys) -> None:
+    check = ProviderHealth(
+        "codex",
+        "Codex",
+        installed=True,
+        authenticated=False,
+        version="0.200.0",
+        detail="missing required capabilities: --ephemeral",
+        executable="codex",
+        compatible=False,
+    )
+    monkeypatch.setattr(cli, "check_providers", lambda: [check])
+
+    assert cli.main(["doctor"]) == 1
+
+    output = capsys.readouterr().out
+    assert "Codex is incompatible (0.200.0)" in output
+    assert "missing required capabilities: --ephemeral" in output
+    assert "npm install -g @openai/codex@0.155.1" in output
+
+
 @pytest.mark.parametrize("missing_count", [0, 1, 2])
 def test_accounts_handles_every_provider_availability_combination(
     missing_count: int, monkeypatch, capsys

@@ -2,6 +2,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 
 from app.providers import health
+from app.providers.compatibility import capability_probes
 from app.user_config import UserConfig
 
 
@@ -40,7 +41,17 @@ def test_provider_check_executes_resolved_binary(monkeypatch) -> None:
 
     def fake_run(command: list[str]) -> CompletedProcess[str]:
         commands.append(command)
-        output = "codex-cli 1.2.3" if "--version" in command else "Logged in"
+        if "--version" in command:
+            output = "codex-cli 1.2.3"
+        elif "--help" in command:
+            probe = next(
+                probe
+                for probe in capability_probes("codex")
+                if list(probe.args) == command[1:]
+            )
+            output = " ".join(probe.required_markers)
+        else:
+            output = "Logged in"
         return CompletedProcess(command, 0, stdout=output, stderr="")
 
     monkeypatch.setattr(health, "_run", fake_run)
@@ -53,8 +64,31 @@ def test_provider_check_executes_resolved_binary(monkeypatch) -> None:
     assert result.executable == "/native/codex"
     assert commands == [
         ["/native/codex", "--version"],
+        ["/native/codex", "exec", "--help"],
+        ["/native/codex", "app-server", "--help"],
         ["/native/codex", "login", "status"],
     ]
+
+
+def test_provider_check_rejects_missing_capability(monkeypatch) -> None:
+    monkeypatch.setattr(
+        health, "_resolve_executable", lambda command: "/native/codex"
+    )
+
+    def fake_run(command: list[str]) -> CompletedProcess[str]:
+        output = "codex-cli 1.2.3" if "--version" in command else "--json"
+        return CompletedProcess(command, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(health, "_run", fake_run)
+
+    result = health._check_provider(
+        "codex", "Codex", "codex", ["login", "status"]
+    )
+
+    assert result.working is False
+    assert result.compatible is False
+    assert result.fix_command == "npm install -g @openai/codex@0.155.1"
+    assert "missing required capabilities" in (result.detail or "")
 
 
 def test_provider_checks_use_saved_command_overrides(

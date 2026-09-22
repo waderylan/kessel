@@ -355,7 +355,7 @@
 - Logs: application logs exclude content and credentials. Windows and launchd discard background standard streams; systemd journald owns Linux retention outside Kessel.
 - Packages: clean isolated sdist/wheel builds succeeded. Wheel contents were limited to `app/`, static/provider assets, and distribution metadata. The sdist included source, tests, README, and build metadata but no `.env`, auth/config, local probe, or secret file. `app` matches the configured top-level package.
 - Dependencies: runtime, dev, and build dependencies are exactly pinned; the post-fix advisory scan found no known vulnerabilities.
-- Version gate: exact supported Codex/Claude versions are checked at startup by default and cannot be disabled accidentally by an absent environment variable.
+- Version gate: minimum Codex/Claude versions and the required CLI capabilities are checked at startup by default. An incompatible provider is disabled without preventing another compatible provider from running, and enforcement cannot be disabled accidentally by an absent environment variable.
 
 ### Setup and CLI
 

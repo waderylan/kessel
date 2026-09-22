@@ -17,6 +17,12 @@ Kessel is intended for local development. It does not expose your subscription t
 | Codex | `npm install -g @openai/codex` | `codex login` |
 | Claude Code | `npm install -g @anthropic-ai/claude-code` | `claude login` |
 
+Kessel requires Codex `0.155.1` or later or Claude Code `2.1.278` or later.
+Newer releases are accepted when their command-line help confirms every
+isolation, statelessness, structured-output, streaming, and account-status
+capability Kessel uses. `kessel doctor` reports an incompatible provider and
+the update command without preventing another compatible provider from running.
+
 Kessel also requires Python 3.10 or later and [pipx](https://pipx.pypa.io/).
 
 ### 2. Install Kessel
@@ -196,7 +202,7 @@ Supported connection targets are `cursor`, `continue`, `aider`, `curl`, `openai-
 | `kessel start` | Install and start durable Kessel for the current user |
 | `kessel stop` | Stop the current Kessel process |
 | `kessel status` | Show whether Kessel is running |
-| `kessel doctor` | Check provider installation and login state |
+| `kessel doctor` | Check provider installation, compatibility, and login state |
 | `kessel connect TARGET` | Print a client's local URL and Kessel key |
 | `kessel key --copy` | Copy the Kessel key without printing it |
 | `kessel key --rotate` | Replace the saved Kessel key |

@@ -14,6 +14,7 @@ from app.runner import (
     ProcessNotFoundError,
     ProcessResult,
     ProcessRunner,
+    ProviderCompatibilityError,
     ProviderRateLimitError,
 )
 
@@ -271,6 +272,24 @@ async def test_account_list_preserves_partial_provider_availability() -> None:
         ("codex", "not_installed"),
         ("claude", "unavailable"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_registry_disables_only_incompatible_provider() -> None:
+    registry = ProviderRegistry(
+        {
+            "codex": UnavailableAccountProvider(ProcessError("unused")),
+            "claude": UnavailableAccountProvider(ProcessError("unused")),
+        },
+        max_concurrent_requests=1,
+    )
+    registry.disable({"codex"})
+
+    with pytest.raises(ProviderCompatibilityError):
+        registry.get("codex")
+    assert registry.get("claude") is not None
+    assert registry.is_enabled("codex") is False
+    assert registry.is_enabled("claude") is True
 
 
 @pytest.mark.asyncio

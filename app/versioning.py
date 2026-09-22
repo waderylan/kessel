@@ -1,70 +1,114 @@
-"""Strict startup checks for the provider CLIs Kessel was tested against."""
+"""Minimum-version and capability checks for provider CLIs."""
 
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.config import Settings
+from app.providers.compatibility import (
+    UnsupportedCliVersionError,
+    capability_probes,
+    missing_capabilities,
+    parse_version,
+    require_minimum_version,
+)
 from app.runner import ProcessError, ProcessNotFoundError, ProcessRunner
-
-
-class UnsupportedCliVersionError(RuntimeError):
-    pass
 
 
 @dataclass(frozen=True)
 class CliVersion:
     command: str
-    expected: str
+    minimum: str
     actual: str
 
 
-def parse_version(output: str) -> str:
-    match = re.search(r"\b(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)\b", output)
-    if match is None:
-        raise UnsupportedCliVersionError(
-            f"could not parse CLI version from {output.strip()!r}"
-        )
-    return match.group(1)
+@dataclass(frozen=True)
+class CliCompatibilityReport:
+    compatible: dict[str, CliVersion]
+    incompatible: dict[str, str]
 
 
-async def _read_version(command: str, expected: str) -> CliVersion | None:
+async def _inspect_cli(
+    provider: str,
+    command: str,
+    minimum: str,
+) -> CliVersion | None:
     runner = ProcessRunner(timeout_seconds=10, max_output_bytes=65_536)
     try:
-        result = await runner.run([command, "--version"], "", Path("."))
+        version_result = await runner.run([command, "--version"], "", Path("."))
     except ProcessNotFoundError:
         return None
     except ProcessError as exc:
-        raise UnsupportedCliVersionError(str(exc)) from exc
-    output = result.stdout + result.stderr
-    return CliVersion(command=command, expected=expected, actual=parse_version(output))
+        raise UnsupportedCliVersionError(
+            f"{provider} version check failed"
+        ) from exc
+
+    actual = parse_version(version_result.stdout + version_result.stderr)
+    require_minimum_version(actual, minimum)
+
+    for index, probe in enumerate(capability_probes(provider)):
+        try:
+            result = await runner.run([command, *probe.args], "", Path("."))
+        except ProcessError as exc:
+            raise UnsupportedCliVersionError(
+                f"{provider} capability check failed"
+            ) from exc
+        missing = missing_capabilities(
+            provider, result.stdout + result.stderr, index
+        )
+        if missing:
+            raise UnsupportedCliVersionError(
+                f"{provider} {actual} is missing required capabilities: "
+                + ", ".join(missing)
+            )
+
+    return CliVersion(command=command, minimum=minimum, actual=actual)
 
 
-async def verify_cli_versions(settings: Settings) -> dict[str, CliVersion]:
-    versions = await asyncio.gather(
-        _read_version(settings.codex_command, settings.expected_codex_version),
-        _read_version(settings.claude_command, settings.expected_claude_version),
+async def verify_cli_versions(settings: Settings) -> CliCompatibilityReport:
+    providers = (
+        ("codex", settings.codex_command, settings.minimum_codex_version),
+        ("claude", settings.claude_command, settings.minimum_claude_version),
     )
-    result = {
-        name: version
-        for name, version in zip(("codex", "claude"), versions, strict=True)
-        if version is not None
-    }
-    if not result:
+    results = await asyncio.gather(
+        *(
+            _inspect_cli(provider, command, minimum)
+            for provider, command, minimum in providers
+        ),
+        return_exceptions=True,
+    )
+
+    compatible: dict[str, CliVersion] = {}
+    incompatible: dict[str, str] = {}
+    installed_count = 0
+    for (provider, _, _), result in zip(providers, results, strict=True):
+        if isinstance(result, asyncio.CancelledError):
+            raise result
+        if result is None:
+            continue
+        installed_count += 1
+        if isinstance(result, UnsupportedCliVersionError):
+            incompatible[provider] = str(result)
+        elif isinstance(result, BaseException):
+            raise result
+        else:
+            compatible[provider] = result
+
+    if compatible:
+        return CliCompatibilityReport(
+            compatible=compatible,
+            incompatible=incompatible,
+        )
+    if installed_count == 0:
         raise UnsupportedCliVersionError(
             "Kessel needs at least one installed provider CLI: Codex or "
             "Claude Code"
         )
-    mismatches = [
-        f"{name} {version.actual} (tested: {version.expected})"
-        for name, version in result.items()
-        if version.actual != version.expected
-    ]
-    if mismatches:
-        raise UnsupportedCliVersionError(
-            "Refusing to start with untested CLI versions: " + ", ".join(mismatches)
-        )
-    return result
+    details = "; ".join(
+        f"{provider}: {detail}" for provider, detail in incompatible.items()
+    )
+    raise UnsupportedCliVersionError(
+        "No installed provider CLI is compatible. " + details
+    )

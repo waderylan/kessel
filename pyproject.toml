@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
     "fastapi==0.141.1",
     "jsonschema==4.25.1",
+    "packaging==26.3",
     "pydantic==2.13.5",
     "tiktoken==0.14.0",
     "uvicorn[standard]==0.53.0",

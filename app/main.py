@@ -44,8 +44,9 @@ from app.runner import (
     ProcessOutputLimitError,
     ProcessRunner,
     ProcessTimeoutError,
-    ProviderBusyError,
     ProviderAuthenticationError,
+    ProviderBusyError,
+    ProviderCompatibilityError,
     ProviderRateLimitError,
 )
 from app.versioning import verify_cli_versions
@@ -158,7 +159,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if owns_registry and app_settings.enforce_cli_versions:
-            app.state.cli_versions = await verify_cli_versions(app_settings)
+            report = await verify_cli_versions(app_settings)
+            app.state.cli_versions = report.compatible
+            app.state.registry.disable(set(report.incompatible))
         yield
         close = getattr(app.state.registry, "close", None)
         if close is not None:
@@ -520,6 +523,8 @@ def create_app(
             status_code, code = 429, "provider_busy"
         elif isinstance(exc, ProviderAuthenticationError) or process_auth_error:
             status_code, code = 503, "provider_not_authenticated"
+        elif isinstance(exc, ProviderCompatibilityError):
+            status_code, code = 503, "provider_incompatible"
         elif isinstance(exc, ProviderRateLimitError):
             status_code, code = 429, "rate_limit_exceeded"
         elif isinstance(exc, ProcessNotFoundError):
@@ -541,6 +546,10 @@ def create_app(
             "provider_busy": "Provider concurrency limit reached",
             "rate_limit_exceeded": "Provider subscription quota is exhausted",
             "provider_not_installed": "Provider command is not installed",
+            "provider_incompatible": (
+                "Provider CLI version or capabilities are incompatible. "
+                "Run: kessel doctor"
+            ),
             "provider_timeout": "Provider request timed out",
             "provider_output_limit": "Provider output exceeded the configured limit",
             "provider_process_failed": "Provider process failed",
@@ -583,13 +592,30 @@ def create_app(
 
     @application.get("/health")
     async def health() -> JSONResponse:
+        command_for = getattr(
+            application.state.registry,
+            "command",
+            lambda name: application.state.registry.get(name).command,
+        )
+        is_enabled = getattr(
+            application.state.registry,
+            "is_enabled",
+            lambda name: True,
+        )
         commands = tuple(
-            (name, application.state.registry.get(name).command)
+            (name, command_for(name))
             for name in application.state.registry.names
         )
         provider_status = await application.state.provider_availability_cache.get(
             commands
         )
+        provider_status = {
+            name: {
+                "available": status["available"]
+                and is_enabled(name)
+            }
+            for name, status in provider_status.items()
+        }
         if not any(status["available"] for status in provider_status.values()):
             return JSONResponse(
                 status_code=503,
