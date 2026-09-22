@@ -33,3 +33,22 @@ does not implement. Remove an entry when C++ matches the documented behavior.
   unavailable providers, every zero/one/two-provider availability combination,
   API authentication and cache headers, setup output, and web loading, empty,
   success, and error states.
+
+## Provider CLI forward compatibility
+
+- Python surface: Startup, `kessel setup`, and `kessel doctor` accept provider
+  CLI releases at or above the supported minimum when every required
+  command-line capability is present. An incompatible provider is disabled
+  independently while another compatible provider remains available.
+- C++ gap: Startup requires an exact Codex and Claude Code version match and
+  does not inspect the CLI capabilities used for isolation, statelessness,
+  structured output, streaming, or account status.
+- Required parity: Compare installed versions against per-provider minimums,
+  reject prereleases below the minimum, and probe non-billable help output for
+  every required flag and subcommand. Return a repairable provider error for an
+  incompatible provider, keep compatible providers available, and report the
+  known-compatible install command through setup and doctor.
+- Verification: Cover versions below, equal to, and above each minimum;
+  prereleases; malformed version output; missing commands; missing required
+  capabilities; mixed compatible and incompatible providers; API errors; and
+  doctor repair guidance.
