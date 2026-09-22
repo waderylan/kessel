@@ -10,7 +10,12 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from app.models import ChatCompletionRequest, ProviderResult, ProviderStreamEvent
+from app.models import (
+    ChatCompletionRequest,
+    ProviderAccountInfo,
+    ProviderResult,
+    ProviderStreamEvent,
+)
 from app.prompting import build_prompt
 from app.rate_limits import RateLimitSnapshot
 from app.runner import ProcessRunner, ProviderRateLimitError
@@ -59,6 +64,10 @@ class ProviderAdapter(ABC):
 
     async def rate_limit(self) -> RateLimitSnapshot | None:
         return self._rate_limit
+
+    async def account_info(self) -> ProviderAccountInfo:
+        """Return normalized identity metadata from the provider CLI."""
+        return ProviderAccountInfo(provider=self.name, status="unavailable")
 
     def observe_model(self, model: str) -> None:
         if model and model.lower() not in {"default", self.name}:

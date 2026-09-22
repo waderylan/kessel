@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from app import cli
+from app.models import ProviderAccountInfo
 from app.providers.health import ProviderHealth
 from app.user_config import UserConfig
 
@@ -60,6 +61,88 @@ def test_unknown_connect_target_gets_generic_pair(configured: UserConfig) -> Non
 
     assert "OpenAI-compatible base URL: http://127.0.0.1:8000/v1/claude" in output
     assert "API key: kessel_test_real_key" in output
+
+
+@pytest.mark.parametrize("missing_count", [0, 1, 2])
+def test_accounts_handles_every_provider_availability_combination(
+    missing_count: int, monkeypatch, capsys
+) -> None:
+    names = (("claude", "Claude Code"), ("codex", "Codex"))
+    checks = [
+        ProviderHealth(
+            name,
+            display,
+            installed=index >= missing_count,
+            authenticated=index >= missing_count,
+            executable=name if index >= missing_count else None,
+        )
+        for index, (name, display) in enumerate(names)
+    ]
+    accounts = [
+        ProviderAccountInfo(
+            provider=check.name,
+            status=("authenticated" if check.installed else "not_installed"),
+            email=(f"{check.name}@example.com" if check.installed else None),
+            subscription=("pro" if check.installed else None),
+        )
+        for check in checks
+    ]
+
+    async def fake_read_provider_accounts(received):
+        assert received == checks
+        return accounts
+
+    monkeypatch.setattr(cli, "check_providers", lambda: checks)
+    monkeypatch.setattr(
+        cli, "read_provider_accounts", fake_read_provider_accounts
+    )
+
+    assert cli.main(["accounts"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Claude Code account:" in output
+    assert "Codex account:" in output
+    assert output.count("[missing]") == missing_count
+
+
+@pytest.mark.asyncio
+async def test_setup_displays_provider_accounts(
+    monkeypatch, capsys
+) -> None:
+    check = ProviderHealth("codex", "Codex", True, True, "1.0.0")
+
+    async def fake_read_provider_accounts(received):
+        assert received == [check]
+        return [
+            ProviderAccountInfo(
+                provider="codex",
+                status="authenticated",
+                email="codex@example.com",
+                subscription="pro",
+                auth_method="chatgpt",
+            )
+        ]
+
+    async def fake_acquire_runtime(config, provider):
+        assert provider == "codex"
+        return "existing", None, None
+
+    monkeypatch.setattr(
+        cli, "read_provider_accounts", fake_read_provider_accounts
+    )
+    monkeypatch.setattr(cli, "_acquire_runtime", fake_acquire_runtime)
+    monkeypatch.setattr(
+        cli, "_test_provider", lambda config, provider: (True, "OK")
+    )
+
+    failed = await cli._setup_provider_tests(
+        UserConfig(api_key="kessel_test_key"), [check]
+    )
+
+    output = capsys.readouterr().out
+    assert failed is False
+    assert "Provider accounts" in output
+    assert "Codex account: codex@example.com | plan=pro | auth=chatgpt" in output
 
 
 def test_setup_is_idempotent(

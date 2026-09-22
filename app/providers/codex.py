@@ -11,6 +11,7 @@ from pathlib import Path
 
 from app.models import (
     ChatCompletionRequest,
+    ProviderAccountInfo,
     ProviderResult,
     ProviderStreamEvent,
     TokenUsage,
@@ -69,6 +70,29 @@ class CodexProvider(ProviderAdapter):
         snapshot = await self.app_server.rate_limit()
         self.set_rate_limit(snapshot)
         return snapshot
+
+    async def account_info(self) -> ProviderAccountInfo:
+        response = await self.app_server.account_info()
+        account = response.get("account")
+        if not isinstance(account, dict):
+            return ProviderAccountInfo(
+                provider=self.name,
+                status="not_authenticated",
+            )
+
+        account_type = self._optional_string(account.get("type"))
+        auth_method = {
+            "apiKey": "api_key",
+            "chatgpt": "chatgpt",
+        }.get(account_type or "", account_type)
+        return ProviderAccountInfo(
+            provider=self.name,
+            status="authenticated",
+            auth_method=auth_method,
+            account_type=account_type,
+            email=self._optional_string(account.get("email")),
+            subscription=self._optional_string(account.get("planType")),
+        )
 
     async def complete(self, request: ChatCompletionRequest) -> ProviderResult:
         if request.backend == "fresh":
@@ -260,6 +284,10 @@ class CodexProvider(ProviderAdapter):
             model=requested_model,
             usage=usage,
         )
+
+    @staticmethod
+    def _optional_string(value: object) -> str | None:
+        return value if isinstance(value, str) and value else None
 
     @staticmethod
     def _parse_usage(raw_usage: object) -> TokenUsage | None:

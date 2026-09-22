@@ -357,6 +357,10 @@ class CodexAppServer:
         self._rate_limit = self._parse_rate_limit(response.get("rateLimits"))
         return self._rate_limit
 
+    async def account_info(self) -> dict[str, object]:
+        await self.start()
+        return await self._request("account/read", {"refreshToken": False})
+
     async def _request(self, method: str, params: dict) -> dict:
         await self._ensure_running()
         loop = asyncio.get_running_loop()

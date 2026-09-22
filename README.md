@@ -26,9 +26,10 @@ pipx install kessel-local
 kessel setup
 ```
 
-`kessel setup` performs four tasks:
+`kessel setup` performs five tasks:
 
 - Checks that provider CLIs are installed and logged in.
+- Displays the account identity and plan reported by each ready provider.
 - Creates a private local API key beginning with `kessel_`.
 - Starts a temporary Kessel process and sends a test request through each available provider.
 - Stops that temporary process when testing finishes.
@@ -189,6 +190,7 @@ Supported connection targets are `cursor`, `continue`, `aider`, `curl`, `openai-
 | Command | Action |
 | --- | --- |
 | `kessel setup` | Configure Kessel and test available providers without leaving it running |
+| `kessel accounts` | Show account information for installed provider CLIs |
 | `kessel run --provider PROVIDER -- COMMAND` | Run an application with a temporary, foreground, or existing durable Kessel |
 | `kessel run --provider PROVIDER` | Own a foreground Kessel session in the current terminal |
 | `kessel start` | Install and start durable Kessel for the current user |
@@ -199,7 +201,12 @@ Supported connection targets are `cursor`, `continue`, `aider`, `curl`, `openai-
 | `kessel key --copy` | Copy the Kessel key without printing it |
 | `kessel key --rotate` | Replace the saved Kessel key |
 
-The local web client is available at `http://127.0.0.1:8000` while Kessel is running. Interactive API documentation is at `http://127.0.0.1:8000/docs`.
+`kessel accounts` works without a running Kessel server. It reports both
+providers as authenticated, signed out, missing, or unavailable and includes
+email, organization, plan, and authentication method when supplied by the CLI.
+Account information is printed only to the invoking terminal.
+
+The local web client is available at `http://127.0.0.1:8000` while Kessel is running. It shows the selected provider's signed-in account after the local Kessel key is entered. Interactive API documentation is at `http://127.0.0.1:8000/docs`.
 
 ## API routes
 
@@ -208,10 +215,38 @@ The local web client is available at `http://127.0.0.1:8000` while Kessel is run
 | `POST` | `/v1/codex/chat/completions` | Codex through the OpenAI SDK format |
 | `POST` | `/v1/claude/chat/completions` | Claude Code through the OpenAI SDK format |
 | `POST` | `/v1/messages` | Claude Code through the Anthropic SDK format |
+| `GET` | `/v1/providers/accounts` | Signed-in provider account information |
 | `GET` | `/v1/{provider}/models` | Provider model discovery |
 | `GET` | `/health` | Local service health |
 
 OpenAI-compatible clients send `Authorization: Bearer <kessel key>`. Anthropic clients send `X-API-Key: <kessel key>`. Kessel accepts either header on authenticated API routes.
+
+`GET /v1/providers/accounts` returns normalized account information for both
+provider CLIs. Each item includes an authentication status and, when supplied
+by the provider, its authentication method, account type, email, organization,
+and subscription. Fields that do not apply to the active login method are
+`null`. The account route requires the Kessel API key; `/health` does not expose
+account information.
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "provider": "codex",
+      "status": "authenticated",
+      "auth_method": "chatgpt",
+      "account_type": "chatgpt",
+      "email": "user@example.com",
+      "organization": null,
+      "subscription": "pro"
+    }
+  ]
+}
+```
+
+Provider status is `authenticated`, `not_authenticated`, `not_installed`, or
+`unavailable`. Kessel reads this information on demand and does not retain it.
 
 ### Important behavior
 
@@ -228,7 +263,7 @@ Use `/docs` for complete request schemas and validation rules.
 
 Configuration is stored in `%LOCALAPPDATA%\Kessel\config.json` on Windows and `$XDG_CONFIG_HOME/kessel/config.json`, normally `~/.config/kessel/config.json`, on macOS and Linux.
 
-Kessel binds to `127.0.0.1`, authenticates every `/v1` route with its local key, and does not store prompts or responses. Provider credentials remain in the provider CLIs' existing authentication stores. Provider processes receive an allowlisted environment and run with tools, user rules, skills, MCP servers, and conversation persistence disabled by default.
+Kessel binds to `127.0.0.1`, authenticates every `/v1` route with its local key, and does not store prompts, responses, or provider account information. Provider credentials remain in the provider CLIs' existing authentication stores. Provider processes receive an allowlisted environment and run with tools, user rules, skills, MCP servers, and conversation persistence disabled by default.
 
 Kessel protects a localhost service from accidental or unauthorized requests. It is not a security boundary against another process running as the same operating-system user because that process can ordinarily read the same local files.
 

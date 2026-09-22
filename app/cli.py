@@ -15,7 +15,9 @@ import urllib.error
 import urllib.request
 from collections.abc import Sequence
 
+from app.models import ProviderAccountInfo
 from app.process_security import ProcessGroupGuard
+from app.providers.accounts import read_provider_accounts
 from app.providers.health import ProviderHealth, check_providers
 from app.run_session import RunSession, RunSessionStore
 from app.service import ServiceError, ServiceManager
@@ -110,6 +112,39 @@ def _print_doctor(checks: Sequence[ProviderHealth]) -> None:
         else:
             print(f"[fix] {check.display_name} isn't logged in.")
             print(f"      Run: {check.fix_command}")
+
+
+def _print_provider_accounts(accounts: Sequence[ProviderAccountInfo]) -> None:
+    display_names = {"codex": "Codex", "claude": "Claude Code"}
+    for account in accounts:
+        name = display_names.get(account.provider, account.provider)
+        if account.status == "not_installed":
+            print(f"[missing] {name} account: provider is not installed")
+            continue
+        if account.status == "not_authenticated":
+            print(f"[signed out] {name} account: provider is not signed in")
+            continue
+        if account.status != "authenticated":
+            print(f"[unavailable] {name} account: details could not be read")
+            continue
+
+        parts = []
+        if account.email:
+            parts.append(account.email)
+        if account.organization and account.organization not in parts:
+            parts.append(account.organization)
+        if account.subscription:
+            parts.append(f"plan={account.subscription}")
+        if account.auth_method:
+            parts.append(f"auth={account.auth_method}")
+        print(f"[ok] {name} account: " + " | ".join(parts or ["signed in"]))
+
+
+def command_accounts() -> int:
+    checks = check_providers()
+    accounts = asyncio.run(read_provider_accounts(checks))
+    _print_provider_accounts(accounts)
+    return 0
 
 
 def _test_provider(config: UserConfig, provider: str) -> tuple[bool, str]:
@@ -449,6 +484,9 @@ async def _setup_provider_tests(
 ) -> bool:
     if not working:
         return False
+    accounts = await read_provider_accounts(working)
+    print("Provider accounts")
+    _print_provider_accounts(accounts)
     kind, owned, _ = await _acquire_runtime(config, working[0].name)
     if kind == "temporary":
         print("[ok] Temporary Kessel started for provider tests")
@@ -609,6 +647,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("setup", help="check providers and configure Kessel")
+    subparsers.add_parser("accounts", help="show provider account information")
     subparsers.add_parser("doctor", help="check provider installation and login")
     env_parser = subparsers.add_parser("env", help="print client environment variables")
     env_parser.add_argument("--provider", choices=("codex", "claude"), default="claude")
@@ -647,6 +686,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "setup":
             return command_setup()
+        if args.command == "accounts":
+            return command_accounts()
         if args.command == "doctor":
             checks = check_providers()
             _print_doctor(checks)

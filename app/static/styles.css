@@ -234,6 +234,11 @@ legend,
   outline-offset: 3px;
 }
 
+#account-status {
+  min-height: 1.15rem;
+  margin-top: 0.65rem;
+}
+
 .field {
   margin-bottom: 1.25rem;
 }

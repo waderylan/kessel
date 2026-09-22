@@ -7,10 +7,15 @@ import math
 from collections.abc import AsyncIterator, Mapping
 from contextlib import aclosing, asynccontextmanager
 
-from app.models import ChatCompletionRequest, ProviderResult, ProviderStreamEvent
+from app.models import (
+    ChatCompletionRequest,
+    ProviderAccountInfo,
+    ProviderResult,
+    ProviderStreamEvent,
+)
 from app.providers.base import ProviderAdapter
 from app.rate_limits import RateLimitSnapshot
-from app.runner import ProcessError, ProviderBusyError
+from app.runner import ProcessError, ProcessNotFoundError, ProviderBusyError
 
 
 class ProviderRegistry:
@@ -97,6 +102,33 @@ class ProviderRegistry:
     async def list_models(self, provider_name: str) -> list[str]:
         async with self._provider_slot(provider_name):
             return await self.get(provider_name).list_models()
+
+    async def account_info(self, provider_name: str) -> ProviderAccountInfo:
+        async with self._provider_slot(provider_name):
+            return await self.get(provider_name).account_info()
+
+    async def account_infos(self) -> list[ProviderAccountInfo]:
+        results = await asyncio.gather(
+            *(self.account_info(name) for name in self.names),
+            return_exceptions=True,
+        )
+        accounts: list[ProviderAccountInfo] = []
+        for name, result in zip(self.names, results, strict=True):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, ProcessNotFoundError):
+                accounts.append(
+                    ProviderAccountInfo(provider=name, status="not_installed")
+                )
+            elif isinstance(result, Exception):
+                accounts.append(
+                    ProviderAccountInfo(provider=name, status="unavailable")
+                )
+            elif isinstance(result, BaseException):
+                raise result
+            else:
+                accounts.append(result)
+        return accounts
 
     async def accepts_model(self, provider_name: str, model: str) -> bool:
         provider = self.get(provider_name)

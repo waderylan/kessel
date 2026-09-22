@@ -30,6 +30,7 @@ from app.models import (
     CompletionMessage,
     ErrorDetail,
     ErrorResponse,
+    ProviderAccountsResponse,
     ProviderResult,
 )
 from app.output_control import control_output_stream
@@ -720,6 +721,16 @@ def create_app(
     async def current_rate_limit_headers(provider: str) -> dict[str, str]:
         snapshot = await application.state.registry.rate_limit(provider)
         return snapshot.headers() if snapshot is not None else {}
+
+    @application.get(
+        "/v1/providers/accounts",
+        response_model=ProviderAccountsResponse,
+        dependencies=[Depends(require_api_key)],
+    )
+    async def provider_accounts(response: Response) -> ProviderAccountsResponse:
+        accounts = await application.state.registry.account_infos()
+        response.headers["cache-control"] = "no-store"
+        return ProviderAccountsResponse(data=accounts)
 
     @application.get("/v1/{provider}/models", dependencies=[Depends(require_api_key)])
     async def list_models(provider: str, response: Response) -> dict[str, object]:

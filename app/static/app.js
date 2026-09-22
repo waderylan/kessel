@@ -9,6 +9,7 @@ const warmInput = document.querySelector("#warm-backend");
 const warmField = document.querySelector("#warm-field");
 const streamInput = document.querySelector("#stream-response");
 const apiKeyInput = document.querySelector("#api-key");
+const accountStatus = document.querySelector("#account-status");
 const submitButton = document.querySelector("#submit-button");
 const formError = document.querySelector("#form-error");
 const serviceStatus = document.querySelector("#service-status");
@@ -18,7 +19,10 @@ const responseText = document.querySelector("#response-text");
 const responseMeta = document.querySelector("#response-meta");
 const requestError = document.querySelector("#request-error");
 const selectedModels = { codex: "default", claude: "default" };
+const providerNames = { codex: "Codex", claude: "Claude Code" };
+let providerAccounts = {};
 let modelRequestSequence = 0;
+let accountRequestSequence = 0;
 
 const states = {
   empty: document.querySelector("#empty-state"),
@@ -45,7 +49,66 @@ function updateEndpoint() {
   warmField.hidden = provider !== "codex";
   if (provider !== "codex") fastTierInput.checked = false;
   if (provider !== "codex") warmInput.checked = false;
+  renderAccount(provider);
   loadModels(provider);
+}
+
+function renderAccount(provider) {
+  const account = providerAccounts[provider];
+  const name = providerNames[provider] || provider;
+  if (!account) {
+    accountStatus.textContent = "Account details are unavailable.";
+    return;
+  }
+  if (account.status === "not_installed") {
+    accountStatus.textContent = `${name} is not installed.`;
+    return;
+  }
+  if (account.status === "not_authenticated") {
+    accountStatus.textContent = `${name} is not signed in.`;
+    return;
+  }
+  if (account.status !== "authenticated") {
+    accountStatus.textContent = `${name} account details are unavailable.`;
+    return;
+  }
+
+  const identity = account.email || account.organization || "Signed in";
+  const details = [account.organization, account.subscription, account.auth_method]
+    .filter((value) => value && value !== identity);
+  accountStatus.textContent = [identity, ...details].join(" · ");
+}
+
+async function loadAccounts() {
+  const requestSequence = ++accountRequestSequence;
+  providerAccounts = {};
+  accountStatus.textContent = "Checking selected provider account.";
+  const headers = {};
+  if (apiKeyInput.value) {
+    headers.Authorization = `Bearer ${apiKeyInput.value}`;
+  }
+  try {
+    const response = await fetch("/v1/providers/accounts", { headers });
+    if (requestSequence !== accountRequestSequence) return;
+    if (!response.ok) {
+      if (response.status === 401) {
+        accountStatus.textContent =
+          "Enter the local API key to view account details.";
+        return;
+      }
+      throw new Error("Account lookup failed");
+    }
+    const data = await response.json();
+    if (requestSequence !== accountRequestSequence) return;
+    providerAccounts = Object.fromEntries(
+      (data.data || []).map((account) => [account.provider, account]),
+    );
+    renderAccount(selectedProvider());
+  } catch {
+    if (requestSequence !== accountRequestSequence) return;
+    providerAccounts = {};
+    accountStatus.textContent = "Account details are unavailable.";
+  }
 }
 
 function replaceModelOptions(models, selectedModel) {
@@ -195,7 +258,10 @@ form.addEventListener("change", (event) => {
   }
 });
 
-apiKeyInput.addEventListener("change", () => loadModels(selectedProvider()));
+apiKeyInput.addEventListener("change", () => {
+  loadAccounts();
+  loadModels(selectedProvider());
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -277,4 +343,5 @@ copyButton.addEventListener("click", async () => {
 });
 
 updateEndpoint();
+loadAccounts();
 checkHealth();

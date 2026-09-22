@@ -232,6 +232,26 @@ class ProviderStreamEvent(BaseModel):
     result: ProviderResult | None = None
 
 
+class ProviderAccountInfo(BaseModel):
+    provider: str
+    status: Literal[
+        "authenticated",
+        "not_authenticated",
+        "not_installed",
+        "unavailable",
+    ]
+    auth_method: str | None = None
+    account_type: str | None = None
+    email: str | None = None
+    organization: str | None = None
+    subscription: str | None = None
+
+
+class ProviderAccountsResponse(BaseModel):
+    object: Literal["list"] = "list"
+    data: list[ProviderAccountInfo]
+
+
 class ModelInfo(BaseModel):
     id: str
     owned_by: str

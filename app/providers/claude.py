@@ -12,6 +12,7 @@ from pathlib import Path
 
 from app.models import (
     ChatCompletionRequest,
+    ProviderAccountInfo,
     ProviderResult,
     ProviderStreamEvent,
     TokenUsage,
@@ -21,6 +22,7 @@ from app.providers.base import ProviderAdapter, uses_default_model
 from app.rate_limits import RateLimitSnapshot
 from app.runner import (
     ProcessError,
+    ProcessExitError,
     ProviderRateLimitError,
     provider_error_from_message,
 )
@@ -65,6 +67,26 @@ class ClaudeProvider(ProviderAdapter):
             self.set_rate_limit(None)
             return None
         return snapshot
+
+    async def account_info(self) -> ProviderAccountInfo:
+        temporary = await asyncio.to_thread(
+            tempfile.TemporaryDirectory, prefix="kessel-claude-account-"
+        )
+        try:
+            try:
+                result = await self.runner.run(
+                    [self.command, "auth", "status", "--json"],
+                    "",
+                    Path(temporary.name),
+                )
+                output = result.stdout
+            except ProcessExitError as exc:
+                output = exc.stdout
+                if not output.strip():
+                    raise
+            return self._parse_account_info(output)
+        finally:
+            await asyncio.to_thread(temporary.cleanup)
 
     def build_command(
         self, request: ChatCompletionRequest, cwd: Path | None = None
@@ -216,6 +238,30 @@ class ClaudeProvider(ProviderAdapter):
         if isinstance(model, dict):
             model = next(iter(model), requested_model)
         return ProviderResult(text=text, model=str(model), usage=usage)
+
+    @classmethod
+    def _parse_account_info(cls, output: str) -> ProviderAccountInfo:
+        try:
+            payload = json.loads(output)
+        except json.JSONDecodeError as exc:
+            raise ProcessError("Claude returned invalid account JSON") from exc
+        if not isinstance(payload, dict):
+            raise ProcessError("Claude returned invalid account JSON")
+
+        authenticated = payload.get("loggedIn") is True
+        return ProviderAccountInfo(
+            provider=cls.name,
+            status=("authenticated" if authenticated else "not_authenticated"),
+            auth_method=cls._optional_string(payload.get("authMethod")),
+            account_type=cls._optional_string(payload.get("apiProvider")),
+            email=cls._optional_string(payload.get("email")),
+            organization=cls._optional_string(payload.get("orgName")),
+            subscription=cls._optional_string(payload.get("subscriptionType")),
+        )
+
+    @staticmethod
+    def _optional_string(value: object) -> str | None:
+        return value if isinstance(value, str) and value else None
 
     @staticmethod
     def _parse_usage(raw_usage: object) -> TokenUsage | None:

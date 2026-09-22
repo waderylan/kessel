@@ -7,6 +7,7 @@ from app.config import Settings
 from app.main import create_app
 from app.models import (
     ChatCompletionRequest,
+    ProviderAccountInfo,
     ProviderResult,
     ProviderStreamEvent,
     TokenUsage,
@@ -26,6 +27,27 @@ class FakeRegistry:
 
     async def list_models(self, provider_name: str) -> list[str]:
         return [f"{provider_name}-confirmed-model"]
+
+    async def account_infos(self) -> list[ProviderAccountInfo]:
+        return [
+            ProviderAccountInfo(
+                provider="codex",
+                status="authenticated",
+                auth_method="chatgpt",
+                account_type="chatgpt",
+                email="codex@example.com",
+                subscription="pro",
+            ),
+            ProviderAccountInfo(
+                provider="claude",
+                status="authenticated",
+                auth_method="claude.ai",
+                account_type="firstParty",
+                email="claude@example.com",
+                organization="Example Org",
+                subscription="max",
+            ),
+        ]
 
     async def preflight(self, provider_name: str):
         return None
@@ -159,6 +181,47 @@ async def test_configured_api_key_is_required() -> None:
     assert "X-API-Key" in unauthorized.json()["error"]["message"]
     assert "Run kessel key to see yours" in unauthorized.json()["error"]["message"]
     assert authorized.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_provider_accounts_are_normalized_and_authenticated() -> None:
+    app = create_app(make_settings(api_key="secret"), registry=FakeRegistry())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8000"
+    ) as client:
+        unauthorized = await client.get("/v1/providers/accounts")
+        response = await client.get(
+            "/v1/providers/accounts",
+            headers={"Authorization": "Bearer secret"},
+        )
+
+    assert unauthorized.status_code == 401
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "object": "list",
+        "data": [
+            {
+                "provider": "codex",
+                "status": "authenticated",
+                "auth_method": "chatgpt",
+                "account_type": "chatgpt",
+                "email": "codex@example.com",
+                "organization": None,
+                "subscription": "pro",
+            },
+            {
+                "provider": "claude",
+                "status": "authenticated",
+                "auth_method": "claude.ai",
+                "account_type": "firstParty",
+                "email": "claude@example.com",
+                "organization": "Example Org",
+                "subscription": "max",
+            },
+        ],
+    }
 
 
 @pytest.mark.asyncio

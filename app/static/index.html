@@ -8,7 +8,7 @@
       content="Send stateless prompts through local Codex and Claude Code subscriptions."
     />
     <title>Kessel local API</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260920-model-select" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260922-provider-accounts" />
   </head>
   <body>
     <header class="site-header">
@@ -43,6 +43,9 @@
                 <span>Claude Code</span>
               </label>
             </div>
+            <p class="helper" id="account-status" aria-live="polite">
+              Checking selected provider account.
+            </p>
           </fieldset>
 
           <div class="field">
@@ -179,6 +182,6 @@
       <p>Local only by default. Requests are not stored by Kessel.</p>
     </footer>
 
-    <script src="/static/app.js?v=20260920-model-select" defer></script>
+    <script src="/static/app.js?v=20260922-provider-accounts" defer></script>
   </body>
 </html>

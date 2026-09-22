@@ -41,6 +41,21 @@ class FakeAppServer(CodexAppServer):
 
 
 @pytest.mark.asyncio
+async def test_account_info_uses_non_refreshing_protocol_request(
+    tmp_path: Path,
+) -> None:
+    instructions = tmp_path / "instructions.txt"
+    instructions.write_text("test", encoding="utf-8")
+    server = FakeAppServer(instructions)
+
+    assert await server.account_info() == {}
+    assert server.calls == [
+        ("account/read", {"refreshToken": False}),
+    ]
+    server._runtime_directory.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_closing_warm_stream_interrupts_turn(tmp_path: Path) -> None:
     instructions = tmp_path / "instructions.txt"
     instructions.write_text("test", encoding="utf-8")

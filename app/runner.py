@@ -48,9 +48,12 @@ class ProviderAuthenticationError(ProcessError):
 
 
 class ProcessExitError(ProcessError):
-    def __init__(self, return_code: int, stderr: str) -> None:
+    def __init__(
+        self, return_code: int, stderr: str, stdout: str = ""
+    ) -> None:
         self.return_code = return_code
         self.stderr = stderr
+        self.stdout = stdout
         super().__init__(f"provider process exited with code {return_code}")
 
 
@@ -188,7 +191,9 @@ class ProcessRunner:
             )
             if process.returncode != 0:
                 raise ProcessExitError(
-                    process.returncode or 1, stderr_text.strip()
+                    process.returncode or 1,
+                    stderr_text.strip(),
+                    stdout_text,
                 )
             return ProcessResult(stdout=stdout_text, stderr=stderr_text)
         finally:

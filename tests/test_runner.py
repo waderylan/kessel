@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.runner import (
+    ProcessExitError,
     ProcessNotFoundError,
     ProcessRunner,
     ProviderAuthenticationError,
@@ -45,6 +46,24 @@ async def test_missing_command_has_clear_error(tmp_path: Path) -> None:
             "",
             tmp_path,
         )
+
+
+@pytest.mark.asyncio
+async def test_nonzero_process_error_retains_stdout(tmp_path: Path) -> None:
+    script = tmp_path / "exit.py"
+    script.write_text(
+        "import sys\nprint('structured output')\n"
+        "print('failure', file=sys.stderr)\nsys.exit(3)\n",
+        encoding="utf-8",
+    )
+    runner = ProcessRunner(timeout_seconds=2, max_output_bytes=1000)
+
+    with pytest.raises(ProcessExitError) as error:
+        await runner.run([sys.executable, str(script)], "", tmp_path)
+
+    assert error.value.return_code == 3
+    assert error.value.stdout.strip() == "structured output"
+    assert error.value.stderr == "failure"
 
 
 @pytest.mark.asyncio
