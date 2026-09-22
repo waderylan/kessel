@@ -2,7 +2,7 @@ import pytest
 
 from app import versioning
 from app.config import Settings
-from app.providers.compatibility import capability_probes
+from app.providers.compatibility import KNOWN_STABLE_VERSIONS, capability_probes
 from app.runner import ProcessNotFoundError, ProcessResult
 from app.versioning import (
     CliVersion,
@@ -33,6 +33,13 @@ def test_minimum_version_accepts_equal_and_newer_releases() -> None:
     require_minimum_version("0.155.1", "0.155.1")
     require_minimum_version("0.156.0", "0.155.1")
     require_minimum_version("1.0.0", "0.155.1")
+
+
+def test_known_stable_versions_match_verified_local_releases() -> None:
+    assert KNOWN_STABLE_VERSIONS == {
+        "codex": "0.155.1",
+        "claude": "2.1.280",
+    }
 
 
 def test_minimum_version_rejects_older_and_prerelease_versions() -> None:

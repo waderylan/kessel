@@ -10,9 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.providers.compatibility import (
+    KNOWN_STABLE_VERSIONS,
     MINIMUM_VERSIONS,
     UnsupportedCliVersionError,
     capability_probes,
+    known_stable_install_command,
     missing_capabilities,
     parse_version,
     require_minimum_version,
@@ -43,20 +45,14 @@ class ProviderHealth:
                 "claude": "npm install -g @anthropic-ai/claude-code",
             }[self.name]
         if not self.compatible:
-            return {
-                "codex": (
-                    "npm install -g "
-                    f"@openai/codex@{MINIMUM_VERSIONS['codex']}"
-                ),
-                "claude": (
-                    "npm install -g "
-                    "@anthropic-ai/claude-code@"
-                    f"{MINIMUM_VERSIONS['claude']}"
-                ),
-            }[self.name]
+            return known_stable_install_command(self.name)
         if not self.authenticated:
             return {"codex": "codex login", "claude": "claude login"}[self.name]
         return None
+
+    @property
+    def known_stable_version(self) -> str:
+        return KNOWN_STABLE_VERSIONS[self.name]
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:

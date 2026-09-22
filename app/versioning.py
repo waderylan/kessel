@@ -10,6 +10,7 @@ from app.config import Settings
 from app.providers.compatibility import (
     UnsupportedCliVersionError,
     capability_probes,
+    known_stable_guidance,
     missing_capabilities,
     parse_version,
     require_minimum_version,
@@ -107,7 +108,8 @@ async def verify_cli_versions(settings: Settings) -> CliCompatibilityReport:
             "Claude Code"
         )
     details = "; ".join(
-        f"{provider}: {detail}" for provider, detail in incompatible.items()
+        f"{provider}: {detail}. {known_stable_guidance(provider)}"
+        for provider, detail in incompatible.items()
     )
     raise UnsupportedCliVersionError(
         "No installed provider CLI is compatible. " + details

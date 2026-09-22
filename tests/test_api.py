@@ -433,7 +433,9 @@ class LoggedOutRegistry(FakeRegistry):
 
 class IncompatibleRegistry(FakeRegistry):
     async def accepts_model(self, provider_name: str, model: str) -> bool:
-        raise ProviderCompatibilityError(provider_name)
+        raise ProviderCompatibilityError(
+            provider_name, "missing required capabilities: --ephemeral"
+        )
 
 
 @pytest.mark.asyncio
@@ -453,7 +455,10 @@ async def test_incompatible_provider_returns_repairable_error() -> None:
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "provider_incompatible"
-    assert "kessel doctor" in response.json()["error"]["message"]
+    message = response.json()["error"]["message"]
+    assert "missing required capabilities: --ephemeral" in message
+    assert "Known stable Codex version: 0.155.1" in message
+    assert "npm install -g @openai/codex@0.155.1" in message
 
 
 @pytest.mark.asyncio

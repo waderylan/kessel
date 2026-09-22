@@ -114,6 +114,7 @@ def _print_doctor(checks: Sequence[ProviderHealth]) -> None:
             print(f"[fix] {check.display_name} is incompatible{suffix}.")
             if check.detail:
                 print(f"      {check.detail}")
+            print(f"      Known stable version: {check.known_stable_version}")
             print(f"      Run: {check.fix_command}")
         else:
             print(f"[fix] {check.display_name} isn't logged in.")

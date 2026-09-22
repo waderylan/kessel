@@ -36,6 +36,7 @@ from app.models import (
 from app.output_control import control_output_stream
 from app.providers.claude import ClaudeProvider
 from app.providers.codex import CodexProvider
+from app.providers.compatibility import known_stable_guidance
 from app.providers.registry import ProviderRegistry
 from app.runner import (
     ProcessError,
@@ -161,7 +162,7 @@ def create_app(
         if owns_registry and app_settings.enforce_cli_versions:
             report = await verify_cli_versions(app_settings)
             app.state.cli_versions = report.compatible
-            app.state.registry.disable(set(report.incompatible))
+            app.state.registry.disable(report.incompatible)
         yield
         close = getattr(app.state.registry, "close", None)
         if close is not None:
@@ -564,6 +565,11 @@ def create_app(
             display = "Claude Code" if auth_provider == "claude" else "Codex"
             command = "claude login" if auth_provider == "claude" else "codex login"
             message = f"{display} isn't logged in. Run: {command}"
+        elif isinstance(exc, ProviderCompatibilityError):
+            message = (
+                f"{exc.provider} CLI is incompatible: {exc.reason}. "
+                f"{known_stable_guidance(exc.provider)}"
+            )
         elif isinstance(exc, ProviderRateLimitError) and exc.retry_after_seconds:
             reset_at = datetime.fromtimestamp(
                 time.time() + exc.retry_after_seconds

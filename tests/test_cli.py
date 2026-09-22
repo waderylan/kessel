@@ -81,6 +81,7 @@ def test_doctor_reports_incompatible_provider(monkeypatch, capsys) -> None:
     output = capsys.readouterr().out
     assert "Codex is incompatible (0.200.0)" in output
     assert "missing required capabilities: --ephemeral" in output
+    assert "Known stable version: 0.155.1" in output
     assert "npm install -g @openai/codex@0.155.1" in output
 
 

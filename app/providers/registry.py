@@ -45,7 +45,7 @@ class ProviderRegistry:
         self._shutdown_grace_seconds = shutdown_grace_seconds
         self._inflight: set[asyncio.Task] = set()
         self._closing = False
-        self._disabled: set[str] = set()
+        self._disabled: dict[str, str] = {}
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -53,14 +53,14 @@ class ProviderRegistry:
 
     def get(self, name: str) -> ProviderAdapter:
         if name in self._disabled:
-            raise ProviderCompatibilityError(name)
+            raise ProviderCompatibilityError(name, self._disabled[name])
         return self._providers[name]
 
     def command(self, name: str) -> str:
         return self._providers[name].command
 
-    def disable(self, names: set[str]) -> None:
-        self._disabled.update(names)
+    def disable(self, reasons: Mapping[str, str]) -> None:
+        self._disabled.update(reasons)
 
     def is_enabled(self, name: str) -> bool:
         return name not in self._disabled

@@ -48,9 +48,10 @@ class ProviderAuthenticationError(ProcessError):
 
 
 class ProviderCompatibilityError(ProcessError):
-    def __init__(self, provider: str) -> None:
+    def __init__(self, provider: str, reason: str) -> None:
         self.provider = provider
-        super().__init__(f"{provider} CLI is incompatible")
+        self.reason = reason
+        super().__init__(f"{provider} CLI is incompatible: {reason}")
 
 
 class ProcessExitError(ProcessError):

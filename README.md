@@ -22,6 +22,7 @@ Newer releases are accepted when their command-line help confirms every
 isolation, statelessness, structured-output, streaming, and account-status
 capability Kessel uses. `kessel doctor` reports an incompatible provider and
 the update command without preventing another compatible provider from running.
+Known-stable recovery versions are Codex `0.155.1` and Claude Code `2.1.280`.
 
 Kessel also requires Python 3.10 or later and [pipx](https://pipx.pypa.io/).
 

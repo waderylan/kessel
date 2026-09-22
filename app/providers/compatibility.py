@@ -17,6 +17,21 @@ MINIMUM_VERSIONS = {
     "claude": "2.1.278",
 }
 
+KNOWN_STABLE_VERSIONS = {
+    "codex": "0.155.1",
+    "claude": "2.1.280",
+}
+
+PROVIDER_PACKAGES = {
+    "codex": "@openai/codex",
+    "claude": "@anthropic-ai/claude-code",
+}
+
+PROVIDER_DISPLAY_NAMES = {
+    "codex": "Codex",
+    "claude": "Claude Code",
+}
+
 
 @dataclass(frozen=True)
 class CapabilityProbe:
@@ -78,6 +93,27 @@ def capability_probes(provider: str) -> tuple[CapabilityProbe, ...]:
         return CAPABILITY_PROBES[provider]
     except KeyError as exc:
         raise ValueError(f"unknown provider: {provider}") from exc
+
+
+def known_stable_install_command(provider: str) -> str:
+    try:
+        package = PROVIDER_PACKAGES[provider]
+        version = KNOWN_STABLE_VERSIONS[provider]
+    except KeyError as exc:
+        raise ValueError(f"unknown provider: {provider}") from exc
+    return f"npm install -g {package}@{version}"
+
+
+def known_stable_guidance(provider: str) -> str:
+    try:
+        display_name = PROVIDER_DISPLAY_NAMES[provider]
+        version = KNOWN_STABLE_VERSIONS[provider]
+    except KeyError as exc:
+        raise ValueError(f"unknown provider: {provider}") from exc
+    return (
+        f"Known stable {display_name} version: {version}. "
+        f"Install it with: {known_stable_install_command(provider)}"
+    )
 
 
 def parse_version(output: str) -> str:

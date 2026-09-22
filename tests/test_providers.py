@@ -283,9 +283,12 @@ async def test_registry_disables_only_incompatible_provider() -> None:
         },
         max_concurrent_requests=1,
     )
-    registry.disable({"codex"})
+    registry.disable({"codex": "missing required capabilities: --ephemeral"})
 
-    with pytest.raises(ProviderCompatibilityError):
+    with pytest.raises(
+        ProviderCompatibilityError,
+        match="missing required capabilities: --ephemeral",
+    ):
         registry.get("codex")
     assert registry.get("claude") is not None
     assert registry.is_enabled("codex") is False
