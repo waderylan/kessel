@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import copy
+import json
 import os
 import shlex
 import shutil
@@ -277,6 +277,14 @@ def _tail_log(path: Path, lines: int = 20) -> str:
     return "\n".join(content.splitlines()[-lines:])
 
 
+def _startup_errors(path: Path, lines: int = 5) -> str:
+    """Return the most recent error lines, or a short tail when there are none."""
+
+    tail = _tail_log(path, 200).splitlines()
+    errors = [line for line in tail if " ERROR " in line or " CRITICAL " in line]
+    return "\n".join(errors[-lines:] if errors else tail[-lines:])
+
+
 class _OwnedServer:
     """A temporary API server whose lifetime belongs to this CLI process."""
 
@@ -333,7 +341,7 @@ class _OwnedServer:
             raise
 
     def _log_tail_suffix(self) -> str:
-        tail = _tail_log(self.manager.log_directory / "kessel.log")
+        tail = _startup_errors(self.manager.log_directory / "kessel.log")
         return f"\n{tail}" if tail else ""
 
     async def _heartbeat(self) -> None:
@@ -409,6 +417,8 @@ async def _acquire_runtime(
         if await asyncio.to_thread(manager.is_registered):
             return "durable", None, None
         return "existing", None, None
+    if await asyncio.to_thread(manager.port_conflict):
+        raise ServiceError(manager.port_conflict_message())
 
     session = await asyncio.to_thread(store.claim, provider)
     if session is None:
@@ -528,6 +538,10 @@ async def _run_application(
 
 
 async def _run(config: UserConfig, provider: str, command: Sequence[str]) -> int:
+    # Fail before starting a server for an application that cannot run.
+    if command and shutil.which(command[0]) is None:
+        raise RuntimeError(f"Application command not found: {command[0]}")
+
     # Installed for the entire lifetime of this command, including while an
     # application runs, so a closed terminal (SIGHUP) or SIGTERM triggers the
     # same graceful cleanup as Ctrl+C instead of leaving Kessel or the
@@ -724,6 +738,9 @@ def command_start() -> int:
             file=sys.stderr,
         )
         return 1
+    if manager.port_conflict():
+        print(manager.port_conflict_message(), file=sys.stderr)
+        return 1
     try:
         changed = manager.ensure_running()
         if not manager.wait_until_running():
@@ -786,6 +803,8 @@ def command_serve() -> int:
     if not effective_api_key(config):
         raise RuntimeError("Kessel is not set up. Run: kessel setup")
     manager = ServiceManager(config)
+    if manager.port_conflict():
+        raise RuntimeError(manager.port_conflict_message())
     manager.clear_stop_request()
     console = sys.stderr is not None and sys.stderr.isatty()
     uvicorn_config = uvicorn.Config(
@@ -867,7 +886,9 @@ def build_parser() -> argparse.ArgumentParser:
     env_parser = subparsers.add_parser("env", help="print client environment variables")
     env_parser.add_argument("--provider", choices=("codex", "claude"), default=None)
     env_parser.add_argument(
-        "--shell", choices=("fish", "powershell"), default="posix"
+        "--shell",
+        choices=("posix", "fish", "powershell"),
+        default="powershell" if os.name == "nt" else "posix",
     )
     connect = subparsers.add_parser("connect", help="print setup for a client")
     connect.add_argument("tool")
@@ -940,7 +961,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(render_connect(config, provider, args.tool))
             return 0
         if args.command == "key":
-            config, _ = load_or_create_config()
+            config = _configured()
             if args.rotate:
                 if os.getenv("KESSEL_API_KEY"):
                     raise RuntimeError(
@@ -961,14 +982,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "stop":
             config = _configured()
             manager = ServiceManager(config)
+            was_running = manager.is_running()
             session = RunSessionStore().active()
-            if session is not None and manager.is_running():
+            if session is not None and was_running:
                 manager.request_stop()
                 if not manager.wait_until_stopped():
                     raise ServiceError("Kessel did not stop within 15 seconds")
             else:
                 manager.stop()
-            print("Kessel stopped.")
+            print("Kessel stopped." if was_running else "Kessel isn't running.")
             return 0
         if args.command == "status":
             config = _configured()

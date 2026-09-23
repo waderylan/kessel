@@ -211,7 +211,7 @@ Both commands accept `--provider {codex,claude}` to choose which provider the Op
 | `kessel status` | Show whether Kessel is running, including a degraded reason |
 | `kessel doctor` | Check provider installation, compatibility, and login state |
 | `kessel connect TARGET [--provider PROVIDER]` | Print a client's local URL and Kessel key |
-| `kessel env [--provider PROVIDER]` | Print client environment variables for the current shell |
+| `kessel env [--provider PROVIDER] [--shell SHELL]` | Print client environment variables (PowerShell syntax by default on Windows, POSIX elsewhere) |
 | `kessel key --copy` | Copy the Kessel key without printing it |
 | `kessel key --rotate` | Replace the saved Kessel key |
 | `kessel logs [-n N]` | Print the last `N` lines (default 20) of the server log |
@@ -273,11 +273,11 @@ Provider status is `authenticated`, `not_authenticated`, `not_installed`, or
 ### Important behavior
 
 - Each request is independent. The default backend starts a fresh provider process for every request.
-- OpenAI and Anthropic streaming formats are supported.
-- `max_tokens`, stop sequences, JSON objects, and JSON Schema output are enforced at Kessel's response boundary. Enforcing `max_tokens` or a stop sequence requires token-counting data that Kessel downloads once the first time it is needed; `kessel setup` pre-warms it so the first request does not pay that cost.
+- OpenAI and Anthropic streaming formats are supported. Streamed Codex requests run on a one-shot Codex app-server, so text arrives as it is generated and generation stops as soon as `max_tokens`, a stop sequence, or a client disconnect ends the response.
+- `max_tokens`, stop sequences, JSON objects, and JSON Schema output are enforced at Kessel's response boundary. Codex also enforces a schema natively when it meets OpenAI's strict rules (every object sets `additionalProperties: false` and lists all of its properties as required); any other schema is described to the model and validated by Kessel. Enforcing `max_tokens` or a stop sequence requires token-counting data that Kessel downloads once the first time it is needed; `kessel setup` pre-warms it so the first request does not pay that cost.
 - Up to 16 OpenAI-style function tools are supported per request, with `tool_choice` of `auto`, `required`, `none`, or a named tool object (`{"type": "function", "function": {"name": "..."}}`). At most one tool call is returned per response, and `parallel_tool_calls` is not supported.
 - The Anthropic Messages route accepts any `claude-*` model ID and rejects requests whose content includes image or document blocks.
-- Codex supports an optional warm backend, but every warm request still receives a new ephemeral thread; the warm Codex process uses the account already signed in to the Codex CLI in place, without copying credentials, and it shuts itself down after 10 minutes of idle time.
+- Codex supports an optional warm backend, but every warm request still receives a new ephemeral thread; the warm Codex process uses the account already signed in to the Codex CLI in place, without copying credentials, and it shuts itself down after 10 minutes of idle time. Warm and streamed Codex requests for the `default` model use the `model` set in your Codex `config.toml`, when one is set.
 - Provider processes inherit `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `NODE_EXTRA_CA_CERTS` from Kessel's environment when those are set, so provider CLIs behind a corporate proxy or custom CA bundle keep working.
 - Kessel must run as one Uvicorn worker because provider limits and warm Codex state are process-local.
 
@@ -287,7 +287,7 @@ Use `/docs` for complete request schemas and validation rules.
 
 Configuration is stored in `%LOCALAPPDATA%\Kessel\config.json` on Windows and `$XDG_CONFIG_HOME/kessel/config.json`, normally `~/.config/kessel/config.json`, on macOS and Linux.
 
-Kessel binds to `127.0.0.1`, authenticates every `/v1` route with its local key, and does not store prompts, responses, or provider account information. Provider credentials remain in the provider CLIs' existing authentication stores. Provider processes receive an allowlisted environment and run with tools, user rules, skills, MCP servers, and conversation persistence disabled by default.
+Kessel binds to `127.0.0.1`, authenticates every `/v1` route with its local key, and does not store prompts, responses, or provider account information. Provider credentials remain in the provider CLIs' existing authentication stores. Provider processes receive an allowlisted environment and run with tools, user rules, skills, MCP servers, and conversation persistence disabled by default. Codex always loads a global `AGENTS.md` from its home directory; Kessel instructs the model to disregard it so personal instructions do not change API responses.
 
 When Kessel runs as a server (`kessel serve`, `kessel start`, or a temporary server owned by `kessel run`), it writes a rotating log file next to its configuration state (in the `logs` subdirectory), capped at 1 MB across 3 files. The log only ever records request method, path, and status; it never records prompts, responses, keys, or account information. Use `kessel logs` to print its tail.
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import socket
 import subprocess
 import sys
 import time
@@ -111,6 +112,26 @@ class ServiceManager:
 
         payload = self.health(timeout=timeout)
         return payload is not None and payload.get("service") == "kessel"
+
+    def port_conflict(self) -> bool:
+        """Return whether another program is listening on Kessel's address."""
+
+        if self.is_running():
+            return False
+        try:
+            with socket.create_connection(
+                (self.config.host, self.config.port), timeout=0.5
+            ):
+                return True
+        except OSError:
+            return False
+
+    def port_conflict_message(self) -> str:
+        return (
+            f"Port {self.config.port} on {self.config.host} is already used by "
+            "another program. Stop that program, or choose another port with: "
+            "kessel setup --port <port>"
+        )
 
     def is_registered(self) -> bool:
         """Return whether the per-user durable service has been installed."""

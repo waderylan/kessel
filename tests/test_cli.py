@@ -1,4 +1,5 @@
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -696,3 +697,94 @@ def test_server_log_config_survives_uvicorn_dictconfig(tmp_path, monkeypatch) ->
             for handler in logging.getLogger(name).handlers[:]:
                 handler.close()
                 logging.getLogger(name).removeHandler(handler)
+
+
+def test_stop_reports_when_nothing_is_running(
+    configured: UserConfig, monkeypatch, capsys
+) -> None:
+    stopped: list[bool] = []
+
+    class IdleServiceManager:
+        def __init__(self, config: UserConfig) -> None:
+            pass
+
+        def is_running(self) -> bool:
+            return False
+
+        def stop(self) -> None:
+            stopped.append(True)
+
+    monkeypatch.setattr(cli, "ServiceManager", IdleServiceManager)
+
+    assert cli.main(["stop"]) == 0
+    assert capsys.readouterr().out == "Kessel isn't running.\n"
+    assert stopped == [True]
+
+
+def test_key_before_setup_does_not_create_a_key(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("KESSEL_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path / "state"))
+
+    assert cli.main(["key"]) == 1
+    assert "kessel setup" in capsys.readouterr().err
+    assert not UserConfig().path.exists()
+
+
+def test_env_defaults_to_the_platform_shell(configured: UserConfig, capsys) -> None:
+    assert cli.main(["env"]) == 0
+    output = capsys.readouterr().out
+    expected = "$env:OPENAI_BASE_URL" if os.name == "nt" else "export OPENAI_BASE_URL"
+    assert expected in output
+
+
+def test_run_rejects_missing_application_before_starting_kessel(
+    configured: UserConfig, monkeypatch, capsys
+) -> None:
+    async def unexpected_acquire(config: UserConfig, provider: str):
+        raise AssertionError("Kessel must not start for a missing command")
+
+    monkeypatch.setattr(cli, "_acquire_runtime", unexpected_acquire)
+
+    assert (
+        cli.main(["run", "--provider", "codex", "--", "kessel-no-such-command"])
+        == 1
+    )
+    assert (
+        "Application command not found: kessel-no-such-command"
+        in capsys.readouterr().err
+    )
+
+
+def test_port_conflict_is_detected_and_blocks_start(
+    configured: UserConfig, monkeypatch, capsys
+) -> None:
+    import socket
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = listener.getsockname()[1]
+    try:
+        manager = ServiceManager(
+            UserConfig(api_key="kessel_test_real_key", port=port)
+        )
+        assert manager.port_conflict() is True
+
+        monkeypatch.setattr(
+            cli,
+            "load_or_create_config",
+            lambda: (UserConfig(api_key="kessel_test_real_key", port=port), False),
+        )
+        monkeypatch.setattr(
+            ServiceManager,
+            "ensure_running",
+            lambda self: (_ for _ in ()).throw(AssertionError("must not install")),
+        )
+        assert cli.main(["start"]) == 1
+        assert f"Port {port}" in capsys.readouterr().err
+    finally:
+        listener.close()
+
+    assert manager.port_conflict() is False
