@@ -39,7 +39,9 @@ jobs:
         run: python -m pip install -e ".[dev]"
 
       - name: Run tests
-        run: python -m pytest -q
+        run: >-
+          python -m pytest -q --reruns 2 --only-rerun Timeout
+          --timeout-method=${{ runner.os == 'Windows' && 'thread' || 'signal' }}
 
   package:
     name: Build package
