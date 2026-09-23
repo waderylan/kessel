@@ -9,9 +9,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.config import Settings
-from app.main import create_app
-from app.models import (
+from kessel_gateway.config import Settings
+from kessel_gateway.main import create_app
+from kessel_gateway.models import (
     ChatCompletionRequest,
     FunctionCall,
     ProviderResult,
@@ -19,9 +19,9 @@ from app.models import (
     TokenUsage,
     ToolCall,
 )
-from app.output_control import control_output_stream
-from app import output_control
-from app.runner import ProcessRunner
+from kessel_gateway.output_control import control_output_stream
+from kessel_gateway import output_control
+from kessel_gateway.runner import ProcessRunner
 
 
 def settings() -> Settings:

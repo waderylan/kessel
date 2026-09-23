@@ -29,7 +29,7 @@ Kessel also requires Python 3.10 or later and [pipx](https://pipx.pypa.io/).
 ### 2. Install Kessel
 
 ```text
-pipx install kessel-local
+pipx install kessel-gateway
 kessel setup
 ```
 
@@ -196,6 +196,7 @@ Supported connection targets are `cursor`, `continue`, `aider`, `curl`, `openai-
 
 | Command | Action |
 | --- | --- |
+| `kessel --version` | Show the installed Kessel version |
 | `kessel setup` | Configure Kessel and test available providers without leaving it running |
 | `kessel accounts` | Show account information for installed provider CLIs |
 | `kessel run --provider PROVIDER -- COMMAND` | Run an application with a temporary, foreground, or existing durable Kessel |
@@ -322,3 +323,22 @@ python -m pytest -q
 ```
 
 Use `kessel setup` for an end-to-end provider test. `kessel serve` is an internal foreground server command intended only for debugging; normal local work should use `kessel run` or `kessel start`.
+
+## Provider terms
+
+Kessel is an independent project and is not affiliated with, endorsed by, or
+sponsored by OpenAI or Anthropic. Review the current
+[provider terms assessment](PROVIDER_TERMS.md) before distributing Kessel or
+changing its local, single-user operating boundaries.
+
+## License
+
+Kessel is source-available under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). Noncommercial use,
+modification, and distribution are permitted under that license. Commercial
+use is reserved exclusively to Rylan Wade. This includes selling Kessel,
+offering paid or advertising-supported access to it, bundling it with a paid
+product or service, using it to provide paid services, or using it for the
+commercial benefit of a for-profit organization.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a contribution.

@@ -5,10 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.models import ChatCompletionRequest
-from app.output_control import control_output_stream
-from app.providers.codex_app_server import CodexAppServer
-from app.runner import ProcessError, ProcessOutputLimitError
+from kessel_gateway.models import ChatCompletionRequest
+from kessel_gateway.output_control import control_output_stream
+from kessel_gateway.providers.codex_app_server import CodexAppServer
+from kessel_gateway.runner import ProcessError, ProcessOutputLimitError
 
 
 class FakeAppServer(CodexAppServer):
@@ -189,7 +189,7 @@ async def test_start_failure_removes_private_runtime(
     instructions.write_text("test", encoding="utf-8")
     server = CodexAppServer("codex", 2, instructions, ())
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "source-home"))
-    monkeypatch.setattr("app.providers.codex_app_server.shutil.which", lambda _: "codex")
+    monkeypatch.setattr("kessel_gateway.providers.codex_app_server.shutil.which", lambda _: "codex")
 
     async def fail_spawn(*args, **kwargs):
         raise OSError("spawn failed")

@@ -7,15 +7,15 @@ import math
 from collections.abc import AsyncIterator, Mapping
 from contextlib import aclosing, asynccontextmanager
 
-from app.models import (
+from kessel_gateway.models import (
     ChatCompletionRequest,
     ProviderAccountInfo,
     ProviderResult,
     ProviderStreamEvent,
 )
-from app.providers.base import ProviderAdapter
-from app.rate_limits import RateLimitSnapshot
-from app.runner import (
+from kessel_gateway.providers.base import ProviderAdapter
+from kessel_gateway.rate_limits import RateLimitSnapshot
+from kessel_gateway.runner import (
     ProcessError,
     ProcessNotFoundError,
     ProviderBusyError,

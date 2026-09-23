@@ -15,13 +15,14 @@ import urllib.error
 import urllib.request
 from collections.abc import Sequence
 
-from app.models import ProviderAccountInfo
-from app.process_security import ProcessGroupGuard
-from app.providers.accounts import read_provider_accounts
-from app.providers.health import ProviderHealth, check_providers
-from app.run_session import RunSession, RunSessionStore
-from app.service import ServiceError, ServiceManager
-from app.user_config import UserConfig, load_or_create_config
+from kessel_gateway import __version__
+from kessel_gateway.models import ProviderAccountInfo
+from kessel_gateway.process_security import ProcessGroupGuard
+from kessel_gateway.providers.accounts import read_provider_accounts
+from kessel_gateway.providers.health import ProviderHealth, check_providers
+from kessel_gateway.run_session import RunSession, RunSessionStore
+from kessel_gateway.service import ServiceError, ServiceManager
+from kessel_gateway.user_config import UserConfig, load_or_create_config
 
 
 CONNECT_TARGETS = (
@@ -622,7 +623,7 @@ def command_serve() -> int:
     manager = ServiceManager(config)
     manager.clear_stop_request()
     uvicorn_config = uvicorn.Config(
-        "app.main:app", host=config.host, port=config.port, workers=1
+        "kessel_gateway.main:app", host=config.host, port=config.port, workers=1
     )
     server = uvicorn.Server(uvicorn_config)
     watcher_done = threading.Event()
@@ -652,6 +653,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kessel", description="Local API for Codex and Claude Code subscriptions"
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("setup", help="check providers and configure Kessel")
     subparsers.add_parser("accounts", help="show provider account information")

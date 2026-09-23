@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 
-from app.models import ChatCompletionRequest
-from app.structured import output_schema
+from kessel_gateway.models import ChatCompletionRequest
+from kessel_gateway.structured import output_schema
 
 
 ROLE_LABELS = {

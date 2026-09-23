@@ -353,7 +353,7 @@
 - Service privilege: Windows uses an `HKCU` Run entry and a detached current-user process; Linux uses `systemctl --user`; macOS installs a user LaunchAgent. No path requests elevation.
 - Service files: Windows serializes the current-user startup command with `subprocess.list2cmdline`; launchd uses `ProgramArguments`; systemd special-character escaping has a regression test. Unit/plist files are `0600` on POSIX.
 - Logs: application logs exclude content and credentials. Windows and launchd discard background standard streams; systemd journald owns Linux retention outside Kessel.
-- Packages: clean isolated sdist/wheel builds succeeded. Wheel contents were limited to `app/`, static/provider assets, and distribution metadata. The sdist included source, tests, README, and build metadata but no `.env`, auth/config, local probe, or secret file. `app` matches the configured top-level package.
+- Packages: clean isolated sdist/wheel builds succeeded. Wheel contents were limited to `kessel_gateway/`, static/provider assets, and distribution metadata. The sdist included source, tests, README, license, and build metadata but no `.env`, auth/config, local probe, or secret file. `kessel_gateway` matches the configured top-level package.
 - Dependencies: runtime, dev, and build dependencies are exactly pinned; the post-fix advisory scan found no known vulnerabilities.
 - Version gate: minimum Codex/Claude versions and the required CLI capabilities are checked at startup by default. An incompatible provider is disabled without preventing another compatible provider from running, and enforcement cannot be disabled accidentally by an absent environment variable.
 

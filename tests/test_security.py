@@ -9,19 +9,19 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.config import Settings
-from app.main import create_app
-from app.models import (
+from kessel_gateway.config import Settings
+from kessel_gateway.main import create_app
+from kessel_gateway.models import (
     ChatCompletionRequest,
     FunctionCall,
     ProviderResult,
     ProviderStreamEvent,
     ToolCall,
 )
-from app.process_security import child_environment
-from app.runner import ProcessExitError, ProcessOutputLimitError, ProcessRunner
-from app.service import ServiceManager
-from app.user_config import UserConfig
+from kessel_gateway.process_security import child_environment
+from kessel_gateway.runner import ProcessExitError, ProcessOutputLimitError, ProcessRunner
+from kessel_gateway.service import ServiceManager
+from kessel_gateway.user_config import UserConfig
 
 
 class SecurityRegistry:
@@ -274,7 +274,7 @@ async def test_health_provider_resolution_uses_short_ttl_cache(monkeypatch) -> N
         calls.append(command)
         return f"/resolved/{command}"
 
-    monkeypatch.setattr("app.main.shutil.which", fake_which)
+    monkeypatch.setattr("kessel_gateway.main.shutil.which", fake_which)
     app = create_app(settings(), registry=SecurityRegistry())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -291,7 +291,7 @@ async def test_health_provider_resolution_uses_short_ttl_cache(monkeypatch) -> N
 
 @pytest.mark.asyncio
 async def test_health_requires_at_least_one_available_provider(monkeypatch) -> None:
-    monkeypatch.setattr("app.main.shutil.which", lambda command: None)
+    monkeypatch.setattr("kessel_gateway.main.shutil.which", lambda command: None)
     app = create_app(settings(), registry=SecurityRegistry())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -322,7 +322,7 @@ async def test_health_accepts_one_available_provider(monkeypatch) -> None:
         lambda name: type("Provider", (), {"command": name})(),
     )
     monkeypatch.setattr(
-        "app.main.shutil.which",
+        "kessel_gateway.main.shutil.which",
         lambda command: f"/resolved/{command}" if command == "claude" else None,
     )
     app = create_app(settings(), registry=registry)

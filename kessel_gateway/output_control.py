@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
-from app.models import ProviderResult, ProviderStreamEvent, TokenUsage
+from kessel_gateway.models import ProviderResult, ProviderStreamEvent, TokenUsage
 
 
 @lru_cache(maxsize=1)

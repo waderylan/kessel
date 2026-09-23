@@ -3,11 +3,39 @@ requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kessel-local"
-version = "0.1.0"
+name = "kessel-gateway"
+dynamic = ["version"]
 description = "OpenAI-compatible local API for Codex and Claude Code subscriptions"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Rylan Wade" },
+]
+maintainers = [
+    { name = "Rylan Wade" },
+]
+keywords = [
+    "anthropic",
+    "claude-code",
+    "codex",
+    "gateway",
+    "local-api",
+    "openai-compatible",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
 dependencies = [
     "fastapi==0.141.1",
     "jsonschema==4.25.1",
@@ -18,11 +46,13 @@ dependencies = [
 ]
 
 [project.scripts]
-kessel = "app.cli:main"
+kessel = "kessel_gateway.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/waderylan/kessel"
 Repository = "https://github.com/waderylan/kessel"
+Issues = "https://github.com/waderylan/kessel/issues"
+PyPI = "https://pypi.org/project/kessel-gateway/"
 
 [project.optional-dependencies]
 dev = [
@@ -37,7 +67,10 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
-include = ["app*"]
+include = ["kessel_gateway*"]
 
 [tool.setuptools.package-data]
-app = ["static/*", "providers/*.txt"]
+kessel_gateway = ["static/*", "providers/*.txt"]
+
+[tool.setuptools.dynamic]
+version = { attr = "kessel_gateway.__version__" }

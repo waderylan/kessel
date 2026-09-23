@@ -1,10 +1,10 @@
 import pytest
 
-from app import versioning
-from app.config import Settings
-from app.providers.compatibility import KNOWN_STABLE_VERSIONS, capability_probes
-from app.runner import ProcessNotFoundError, ProcessResult
-from app.versioning import (
+from kessel_gateway import versioning
+from kessel_gateway.config import Settings
+from kessel_gateway.providers.compatibility import KNOWN_STABLE_VERSIONS, capability_probes
+from kessel_gateway.runner import ProcessNotFoundError, ProcessResult
+from kessel_gateway.versioning import (
     CliVersion,
     UnsupportedCliVersionError,
     parse_version,
@@ -110,7 +110,7 @@ async def test_startup_check_rejects_older_versions(monkeypatch) -> None:
             f"version 0.1.0 is below the required minimum {minimum}"
         )
 
-    monkeypatch.setattr("app.versioning._inspect_cli", fake_inspect)
+    monkeypatch.setattr("kessel_gateway.versioning._inspect_cli", fake_inspect)
     settings = Settings(
         api_key=None,
         cors_origins=(),
@@ -134,7 +134,7 @@ async def test_startup_check_accepts_one_installed_provider(monkeypatch) -> None
             return None
         return CliVersion(command=command, minimum=minimum, actual="9.9.9")
 
-    monkeypatch.setattr("app.versioning._inspect_cli", fake_inspect)
+    monkeypatch.setattr("kessel_gateway.versioning._inspect_cli", fake_inspect)
     settings = Settings(
         api_key=None,
         cors_origins=(),
@@ -160,7 +160,7 @@ async def test_startup_check_isolates_an_incompatible_provider(monkeypatch) -> N
             raise UnsupportedCliVersionError("missing required capabilities: --json")
         return CliVersion(command=command, minimum=minimum, actual="9.9.9")
 
-    monkeypatch.setattr("app.versioning._inspect_cli", fake_inspect)
+    monkeypatch.setattr("kessel_gateway.versioning._inspect_cli", fake_inspect)
     settings = Settings(
         api_key=None,
         cors_origins=(),
@@ -184,7 +184,7 @@ async def test_startup_check_rejects_zero_installed_providers(monkeypatch) -> No
     async def missing(provider: str, command: str, minimum: str) -> None:
         return None
 
-    monkeypatch.setattr("app.versioning._inspect_cli", missing)
+    monkeypatch.setattr("kessel_gateway.versioning._inspect_cli", missing)
     settings = Settings(
         api_key=None,
         cors_origins=(),

@@ -9,7 +9,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.providers.compatibility import (
+from kessel_gateway.providers.compatibility import (
     KNOWN_STABLE_VERSIONS,
     MINIMUM_VERSIONS,
     UnsupportedCliVersionError,
@@ -19,7 +19,7 @@ from app.providers.compatibility import (
     parse_version,
     require_minimum_version,
 )
-from app.user_config import UserConfig
+from kessel_gateway.user_config import UserConfig
 
 
 @dataclass(frozen=True)

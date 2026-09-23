@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.process_security import ProcessGroupGuard, child_environment
+from kessel_gateway.process_security import ProcessGroupGuard, child_environment
 
 
 class ProcessError(RuntimeError):

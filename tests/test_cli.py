@@ -2,10 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from app import cli
-from app.models import ProviderAccountInfo
-from app.providers.health import ProviderHealth
-from app.user_config import UserConfig
+from kessel_gateway import cli
+from kessel_gateway import __version__
+from kessel_gateway.models import ProviderAccountInfo
+from kessel_gateway.providers.health import ProviderHealth
+from kessel_gateway.user_config import UserConfig
 
 
 @pytest.fixture
@@ -15,6 +16,14 @@ def configured(tmp_path: Path, monkeypatch) -> UserConfig:
     config = UserConfig(api_key="kessel_test_real_key")
     config.save()
     return config
+
+
+def test_cli_version(capsys) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--version"])
+
+    assert exit_info.value.code == 0
+    assert capsys.readouterr().out.strip() == f"kessel {__version__}"
 
 
 @pytest.mark.parametrize(

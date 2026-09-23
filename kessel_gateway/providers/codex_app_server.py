@@ -12,16 +12,17 @@ import time
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
-from app.models import (
+from kessel_gateway import __version__
+from kessel_gateway.models import (
     ChatCompletionRequest,
     ProviderResult,
     ProviderStreamEvent,
     TokenUsage,
 )
-from app.process_security import ProcessGroupGuard, child_environment
-from app.providers.base import uses_default_model
-from app.rate_limits import RateLimitSnapshot
-from app.runner import (
+from kessel_gateway.process_security import ProcessGroupGuard, child_environment
+from kessel_gateway.providers.base import uses_default_model
+from kessel_gateway.rate_limits import RateLimitSnapshot
+from kessel_gateway.runner import (
     ProcessError,
     ProcessNotFoundError,
     ProcessOutputLimitError,
@@ -123,9 +124,9 @@ class CodexAppServer:
                     "initialize",
                     {
                         "clientInfo": {
-                            "name": "kessel_local_api",
+                            "name": "kessel_gateway_api",
                             "title": "Kessel Local API",
-                            "version": "0.2.0",
+                            "version": __version__,
                         }
                     },
                 )

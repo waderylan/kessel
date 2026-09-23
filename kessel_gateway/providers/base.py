@@ -10,16 +10,16 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from app.models import (
+from kessel_gateway.models import (
     ChatCompletionRequest,
     ProviderAccountInfo,
     ProviderResult,
     ProviderStreamEvent,
 )
-from app.prompting import build_prompt
-from app.rate_limits import RateLimitSnapshot
-from app.runner import ProcessRunner, ProviderRateLimitError
-from app.structured import output_schema, parse_structured_result
+from kessel_gateway.prompting import build_prompt
+from kessel_gateway.rate_limits import RateLimitSnapshot
+from kessel_gateway.runner import ProcessRunner, ProviderRateLimitError
+from kessel_gateway.structured import output_schema, parse_structured_result
 
 
 class ProviderAdapter(ABC):

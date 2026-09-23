@@ -1,5 +1,5 @@
-from app.models import ChatCompletionRequest, ChatMessage
-from app.prompting import build_prompt
+from kessel_gateway.models import ChatCompletionRequest, ChatMessage
+from kessel_gateway.prompting import build_prompt
 
 
 def test_build_prompt_preserves_roles_and_order() -> None:

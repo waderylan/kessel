@@ -21,8 +21,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.config import Settings, settings
-from app.models import (
+from kessel_gateway import __version__
+from kessel_gateway.config import Settings, settings
+from kessel_gateway.models import (
     AnthropicMessagesRequest,
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -33,12 +34,12 @@ from app.models import (
     ProviderAccountsResponse,
     ProviderResult,
 )
-from app.output_control import control_output_stream
-from app.providers.claude import ClaudeProvider
-from app.providers.codex import CodexProvider
-from app.providers.compatibility import known_stable_guidance
-from app.providers.registry import ProviderRegistry
-from app.runner import (
+from kessel_gateway.output_control import control_output_stream
+from kessel_gateway.providers.claude import ClaudeProvider
+from kessel_gateway.providers.codex import CodexProvider
+from kessel_gateway.providers.compatibility import known_stable_guidance
+from kessel_gateway.providers.registry import ProviderRegistry
+from kessel_gateway.runner import (
     ProcessError,
     ProcessExitError,
     ProcessNotFoundError,
@@ -50,8 +51,8 @@ from app.runner import (
     ProviderCompatibilityError,
     ProviderRateLimitError,
 )
-from app.versioning import verify_cli_versions
-from app.user_config import UserConfig
+from kessel_gateway.versioning import verify_cli_versions
+from kessel_gateway.user_config import UserConfig
 
 
 STATIC_DIRECTORY = Path(__file__).parent / "static"
@@ -170,7 +171,7 @@ def create_app(
 
     application = FastAPI(
         title="Kessel Local API",
-        version="0.1.0",
+        version=__version__,
         description=(
             "Stateless OpenAI-compatible Chat Completions over local Codex and "
             "Claude Code subscriptions."

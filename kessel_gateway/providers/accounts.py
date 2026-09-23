@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from app.models import ProviderAccountInfo
-from app.providers.claude import ClaudeProvider
-from app.providers.codex import CodexProvider
-from app.providers.health import ProviderHealth
-from app.providers.registry import ProviderRegistry
-from app.runner import ProcessRunner
+from kessel_gateway.models import ProviderAccountInfo
+from kessel_gateway.providers.claude import ClaudeProvider
+from kessel_gateway.providers.codex import CodexProvider
+from kessel_gateway.providers.health import ProviderHealth
+from kessel_gateway.providers.registry import ProviderRegistry
+from kessel_gateway.runner import ProcessRunner
 
 
 async def read_provider_accounts(

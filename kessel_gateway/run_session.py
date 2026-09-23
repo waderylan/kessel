@@ -9,7 +9,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from app.user_config import state_directory
+from kessel_gateway.user_config import state_directory
 
 
 SESSION_MAX_AGE_SECONDS = 5.0

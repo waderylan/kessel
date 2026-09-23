@@ -2,13 +2,13 @@ import json
 
 import pytest
 
-from app.providers.accounts import read_provider_accounts
-from app.providers.claude import ClaudeProvider
-from app.providers.codex import CodexProvider
-from app.providers.health import ProviderHealth
-from app.providers.registry import ProviderRegistry
-from app.models import ChatCompletionRequest
-from app.runner import (
+from kessel_gateway.providers.accounts import read_provider_accounts
+from kessel_gateway.providers.claude import ClaudeProvider
+from kessel_gateway.providers.codex import CodexProvider
+from kessel_gateway.providers.health import ProviderHealth
+from kessel_gateway.providers.registry import ProviderRegistry
+from kessel_gateway.models import ChatCompletionRequest
+from kessel_gateway.runner import (
     ProcessError,
     ProcessExitError,
     ProcessNotFoundError,

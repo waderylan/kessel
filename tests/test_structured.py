@@ -3,9 +3,9 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from app.models import ChatCompletionRequest, ProviderResult
-from app.runner import ProcessError
-from app.structured import output_schema, parse_structured_result
+from kessel_gateway.models import ChatCompletionRequest, ProviderResult
+from kessel_gateway.runner import ProcessError
+from kessel_gateway.structured import output_schema, parse_structured_result
 
 
 def tool_request() -> ChatCompletionRequest:

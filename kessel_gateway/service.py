@@ -17,7 +17,7 @@ try:
 except ImportError:  # pragma: no cover - only available on Windows
     winreg = None  # type: ignore[assignment]
 
-from app.user_config import UserConfig, state_directory
+from kessel_gateway.user_config import UserConfig, state_directory
 
 
 class ServiceError(RuntimeError):
@@ -32,7 +32,7 @@ class ServiceManager:
 
     @property
     def command(self) -> list[str]:
-        return [sys.executable, "-m", "app.cli", "serve"]
+        return [sys.executable, "-m", "kessel_gateway.cli", "serve"]
 
     @property
     def log_directory(self) -> Path:
@@ -182,7 +182,7 @@ class ServiceManager:
         return [
             str(pythonw if pythonw.exists() else executable),
             "-m",
-            "app.cli",
+            "kessel_gateway.cli",
             "serve",
         ]
 

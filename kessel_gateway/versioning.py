@@ -6,8 +6,8 @@ import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.config import Settings
-from app.providers.compatibility import (
+from kessel_gateway.config import Settings
+from kessel_gateway.providers.compatibility import (
     UnsupportedCliVersionError,
     capability_probes,
     known_stable_guidance,
@@ -15,7 +15,7 @@ from app.providers.compatibility import (
     parse_version,
     require_minimum_version,
 )
-from app.runner import ProcessError, ProcessNotFoundError, ProcessRunner
+from kessel_gateway.runner import ProcessError, ProcessNotFoundError, ProcessRunner
 
 
 @dataclass(frozen=True)

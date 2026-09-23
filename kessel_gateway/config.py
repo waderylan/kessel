@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from app.providers.compatibility import MINIMUM_VERSIONS
-from app.user_config import UserConfig
+from kessel_gateway.providers.compatibility import MINIMUM_VERSIONS
+from kessel_gateway.user_config import UserConfig
 
 
 def _positive_int(name: str, default: int) -> int:

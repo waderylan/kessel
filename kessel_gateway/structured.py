@@ -9,8 +9,8 @@ from typing import Any
 from jsonschema.exceptions import ValidationError
 from jsonschema.validators import validator_for
 
-from app.models import ChatCompletionRequest, FunctionCall, ProviderResult, ToolCall
-from app.runner import ProcessError
+from kessel_gateway.models import ChatCompletionRequest, FunctionCall, ProviderResult, ToolCall
+from kessel_gateway.runner import ProcessError
 
 
 def output_schema(request: ChatCompletionRequest) -> dict[str, Any] | None:

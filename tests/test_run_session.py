@@ -3,7 +3,7 @@ import os
 import time
 from pathlib import Path
 
-from app.run_session import RunSessionStore
+from kessel_gateway.run_session import RunSessionStore
 
 
 def test_run_session_claim_heartbeat_and_release(

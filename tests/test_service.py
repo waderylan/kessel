@@ -2,9 +2,9 @@ import subprocess
 from contextlib import nullcontext
 from pathlib import Path
 
-from app import service
-from app.service import ServiceManager
-from app.user_config import UserConfig
+from kessel_gateway import service
+from kessel_gateway.service import ServiceManager
+from kessel_gateway.user_config import UserConfig
 
 
 class FakeRegistry:
@@ -31,7 +31,7 @@ class FakeRegistry:
     def QueryValueEx(self, key: object, name: str) -> tuple[str, int]:
         if name != "Kessel":
             raise FileNotFoundError(name)
-        return "pythonw -m app.cli serve", self.REG_SZ
+        return "pythonw -m kessel_gateway.cli serve", self.REG_SZ
 
 
 def test_windows_install_uses_current_user_startup_without_schtasks(

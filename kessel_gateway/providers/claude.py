@@ -10,23 +10,23 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
 
-from app.models import (
+from kessel_gateway.models import (
     ChatCompletionRequest,
     ProviderAccountInfo,
     ProviderResult,
     ProviderStreamEvent,
     TokenUsage,
 )
-from app.prompting import build_prompt
-from app.providers.base import ProviderAdapter, uses_default_model
-from app.rate_limits import RateLimitSnapshot
-from app.runner import (
+from kessel_gateway.prompting import build_prompt
+from kessel_gateway.providers.base import ProviderAdapter, uses_default_model
+from kessel_gateway.rate_limits import RateLimitSnapshot
+from kessel_gateway.runner import (
     ProcessError,
     ProcessExitError,
     ProviderRateLimitError,
     provider_error_from_message,
 )
-from app.structured import output_schema
+from kessel_gateway.structured import output_schema
 
 
 class ClaudeProvider(ProviderAdapter):

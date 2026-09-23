@@ -1,9 +1,9 @@
 from pathlib import Path
 from subprocess import CompletedProcess
 
-from app.providers import health
-from app.providers.compatibility import capability_probes
-from app.user_config import UserConfig
+from kessel_gateway.providers import health
+from kessel_gateway.providers.compatibility import capability_probes
+from kessel_gateway.user_config import UserConfig
 
 
 def test_codex_npm_shim_resolves_to_native_windows_binary(

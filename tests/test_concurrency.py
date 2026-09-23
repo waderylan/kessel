@@ -12,17 +12,17 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app.config import Settings
-from app.main import create_app
-from app.models import (
+from kessel_gateway.config import Settings
+from kessel_gateway.main import create_app
+from kessel_gateway.models import (
     ChatCompletionRequest,
     ProviderResult,
     ProviderStreamEvent,
 )
-from app.providers.base import ProviderAdapter
-from app.providers.codex_app_server import CodexAppServer
-from app.providers.registry import ProviderRegistry
-from app.runner import ProcessRunner
+from kessel_gateway.providers.base import ProviderAdapter
+from kessel_gateway.providers.codex_app_server import CodexAppServer
+from kessel_gateway.providers.registry import ProviderRegistry
+from kessel_gateway.runner import ProcessRunner
 
 
 def make_settings() -> Settings:

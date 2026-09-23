@@ -17,10 +17,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from app.config import Settings
-from app.main import create_app
-from app.models import ChatCompletionRequest, ProviderResult, ProviderStreamEvent
-from app.runner import ProcessRunner
+from kessel_gateway.config import Settings
+from kessel_gateway.main import create_app
+from kessel_gateway.models import ChatCompletionRequest, ProviderResult, ProviderStreamEvent
+from kessel_gateway.runner import ProcessRunner
 
 
 class _Provider:

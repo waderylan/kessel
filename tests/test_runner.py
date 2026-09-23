@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app.runner import (
+from kessel_gateway.runner import (
     ProcessExitError,
     ProcessNotFoundError,
     ProcessRunner,

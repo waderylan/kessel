@@ -9,23 +9,23 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
 
-from app.models import (
+from kessel_gateway.models import (
     ChatCompletionRequest,
     ProviderAccountInfo,
     ProviderResult,
     ProviderStreamEvent,
     TokenUsage,
 )
-from app.prompting import build_prompt
-from app.providers.codex_app_server import CodexAppServer
-from app.providers.base import (
+from kessel_gateway.prompting import build_prompt
+from kessel_gateway.providers.codex_app_server import CodexAppServer
+from kessel_gateway.providers.base import (
     ProviderAdapter,
     uses_default_model,
     write_output_schema,
 )
-from app.rate_limits import RateLimitSnapshot
-from app.runner import ProcessError, provider_error_from_message
-from app.structured import output_schema
+from kessel_gateway.rate_limits import RateLimitSnapshot
+from kessel_gateway.runner import ProcessError, provider_error_from_message
+from kessel_gateway.structured import output_schema
 
 
 class CodexProvider(ProviderAdapter):
@@ -108,7 +108,7 @@ class CodexProvider(ProviderAdapter):
                     final = event.result
         if final is None:
             raise ProcessError("Codex App Server returned no result")
-        from app.structured import parse_structured_result
+        from kessel_gateway.structured import parse_structured_result
 
         return parse_structured_result(request, final)
 
@@ -177,7 +177,7 @@ class CodexProvider(ProviderAdapter):
             if schema is not None:
                 if buffered_result is None:
                     raise ProcessError("Codex App Server returned no result")
-                from app.structured import parse_structured_result
+                from kessel_gateway.structured import parse_structured_result
 
                 yield ProviderStreamEvent(
                     result=parse_structured_result(request, buffered_result)

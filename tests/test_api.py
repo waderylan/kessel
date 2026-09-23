@@ -3,16 +3,16 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from app.config import Settings
-from app.main import create_app
-from app.models import (
+from kessel_gateway.config import Settings
+from kessel_gateway.main import create_app
+from kessel_gateway.models import (
     ChatCompletionRequest,
     ProviderAccountInfo,
     ProviderResult,
     ProviderStreamEvent,
     TokenUsage,
 )
-from app.runner import (
+from kessel_gateway.runner import (
     ProviderAuthenticationError,
     ProviderCompatibilityError,
     ProviderRateLimitError,

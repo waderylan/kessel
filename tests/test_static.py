@@ -1,7 +1,7 @@
 from pathlib import Path
 
 
-STATIC = Path(__file__).parents[1] / "app" / "static"
+STATIC = Path(__file__).parents[1] / "kessel_gateway" / "static"
 
 
 def test_model_control_is_provider_aware_dropdown() -> None:
