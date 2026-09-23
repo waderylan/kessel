@@ -26,8 +26,8 @@ from kessel_gateway.rate_limits import RateLimitSnapshot
 from kessel_gateway.runner import (
     ProcessError,
     ProcessNotFoundError,
-    ProcessOutputLimitError,
     ProcessTimeoutError,
+    check_reply_size,
     hidden_process_options,
     provider_process_options,
     provider_error_from_message,
@@ -269,6 +269,7 @@ class CodexAppServer:
             turn_params["outputSchema"] = schema
 
         full_text = ""
+        reply_bytes = 0
         current_item_id: str | None = None
         current_item_text = ""
         usage: TokenUsage | None = None
@@ -314,10 +315,8 @@ class CodexAppServer:
                             current_item_text = ""
                         current_item_text += delta
                         full_text += delta
-                        if len(full_text.encode("utf-8")) > self.max_output_bytes:
-                            raise ProcessOutputLimitError(
-                                f"provider output exceeded {self.max_output_bytes} bytes"
-                            )
+                        reply_bytes += len(delta.encode("utf-8"))
+                        check_reply_size(reply_bytes, self.max_output_bytes)
                         yield ProviderStreamEvent(delta=delta)
                 elif method == "item/completed":
                     item = params.get("item", {})
@@ -340,10 +339,8 @@ class CodexAppServer:
                             current_item_id = item_id
                             current_item_text = text
                             full_text += text
-                            if len(full_text.encode("utf-8")) > self.max_output_bytes:
-                                raise ProcessOutputLimitError(
-                                    f"provider output exceeded {self.max_output_bytes} bytes"
-                                )
+                            reply_bytes += len(text.encode("utf-8"))
+                            check_reply_size(reply_bytes, self.max_output_bytes)
                             yield ProviderStreamEvent(delta=text)
                 elif method == "thread/tokenUsage/updated":
                     usage = self._parse_usage(params.get("tokenUsage"))
@@ -866,8 +863,16 @@ class CodexAppServer:
             windows, key=lambda item: float(item.get("usedPercent", 0))
         )
         used_percent = float(limiting_window.get("usedPercent", 0))
-        if raw_limits.get("rateLimitReachedType") is not None:
+        reached = raw_limits.get("rateLimitReachedType") is not None
+        if reached:
             used_percent = 100.0
+        credits = raw_limits.get("credits")
+        has_credits = isinstance(credits, dict) and (
+            credits.get("hasCredits") is True or credits.get("unlimited") is True
+        )
+        # Codex keeps serving a spent window from paid credits and reports an
+        # actual block through rateLimitReachedType.
+        blocked = reached or (used_percent >= 100.0 and not has_credits)
         resets_at = limiting_window.get("resetsAt")
         if not isinstance(resets_at, int):
             resets_at = None
@@ -879,4 +884,5 @@ class CodexAppServer:
                 if raw_limits.get("limitId") is not None
                 else None
             ),
+            blocked=blocked,
         )

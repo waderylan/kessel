@@ -658,7 +658,11 @@ def create_app(
     ) -> JSONResponse:
         first_error = exc.errors()[0] if exc.errors() else {}
         location = first_error.get("loc", ())
-        parameter = ".".join(str(part) for part in location if part != "body") or None
+        parameter = (
+            None
+            if first_error.get("type") == "json_invalid"
+            else ".".join(str(part) for part in location if part != "body") or None
+        )
         message = first_error.get("msg", "Invalid request")
         return error_response(
             request,
@@ -750,7 +754,11 @@ def create_app(
                 f"{exc.provider} CLI is incompatible: {exc.reason}. "
                 f"{known_stable_guidance(exc.provider)}"
             )
-        elif isinstance(exc, ProviderRateLimitError) and exc.retry_after_seconds:
+        elif (
+            isinstance(exc, ProviderRateLimitError)
+            and not isinstance(exc, ProviderBusyError)
+            and exc.retry_after_seconds
+        ):
             reset_at = datetime.fromtimestamp(
                 time.time() + exc.retry_after_seconds
             ).astimezone()

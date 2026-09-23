@@ -44,6 +44,19 @@ class ChatMessage(BaseModel):
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
 
+    @field_validator("content", mode="before")
+    @classmethod
+    def require_text_parts(cls, content: object) -> object:
+        if isinstance(content, list):
+            for part in content:
+                part_type = part.get("type") if isinstance(part, dict) else None
+                if part_type != "text":
+                    raise ValueError(
+                        "only text content parts are supported; got "
+                        f"'{part_type or type(part).__name__}'"
+                    )
+        return content
+
     def text(self) -> str:
         if self.content is None:
             if self.tool_calls:
@@ -257,6 +270,8 @@ class ProviderResult(BaseModel):
 class ProviderStreamEvent(BaseModel):
     delta: str = ""
     result: ProviderResult | None = None
+    # The resolved model, when a provider reports it before its final result.
+    model: str | None = None
 
 
 class ProviderAccountInfo(BaseModel):

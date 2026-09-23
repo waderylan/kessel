@@ -15,9 +15,14 @@ class RateLimitSnapshot:
     resets_at: int | None = None
     limit_id: str | None = None
     retry_after_seconds: int | None = None
+    # When set, the provider's own verdict on whether requests are blocked.
+    # A spent window is not blocking while paid credits cover further usage.
+    blocked: bool | None = None
 
     @property
     def exhausted(self) -> bool:
+        if self.blocked is not None:
+            return self.blocked
         return self.remaining_percent <= 0
 
     def headers(self) -> dict[str, str]:

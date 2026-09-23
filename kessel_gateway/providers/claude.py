@@ -27,6 +27,7 @@ from kessel_gateway.runner import (
     ProcessExitError,
     ProviderInvalidModelError,
     ProviderRateLimitError,
+    check_reply_size,
     provider_error_from_message,
 )
 from kessel_gateway.structured import output_schema
@@ -41,7 +42,9 @@ _MODEL_REJECTION_QUALIFIERS = (
     "not found",
     "invalid model",
     "does not exist",
+    "may not exist",
     "unknown model",
+    "issue with the selected model",
 )
 
 
@@ -187,6 +190,7 @@ class ClaudeProvider(ProviderAdapter):
 
         prompt = build_prompt(request)
         full_text = ""
+        reply_bytes = 0
         final_result: ProviderResult | None = None
         temporary = await asyncio.to_thread(
             tempfile.TemporaryDirectory, prefix="kessel-claude-"
@@ -227,7 +231,19 @@ class ClaudeProvider(ProviderAdapter):
                             text = delta.get("text", "")
                             if isinstance(text, str) and text:
                                 full_text += text
+                                reply_bytes += len(text.encode("utf-8"))
+                                check_reply_size(
+                                    reply_bytes,
+                                    getattr(self.runner, "max_output_bytes", None),
+                                )
                                 yield ProviderStreamEvent(delta=text)
+                    elif (
+                        event.get("type") == "system"
+                        and event.get("subtype") == "init"
+                        and isinstance(event.get("model"), str)
+                        and event["model"]
+                    ):
+                        yield ProviderStreamEvent(model=event["model"])
                     elif (
                         event.get("type") == "system"
                         and event.get("subtype") == "api_retry"
@@ -254,6 +270,13 @@ class ClaudeProvider(ProviderAdapter):
                         raise ProviderRateLimitError(
                             "Claude rate limit reached",
                             retry_after_seconds=retry_after,
+                        )
+                    elif (
+                        event.get("type") == "assistant"
+                        and event.get("error") == "model_not_found"
+                    ):
+                        raise ProviderInvalidModelError(
+                            f"Claude rejected model {request.model!r}"
                         )
                     elif event.get("type") == "result":
                         if event.get("is_error"):
@@ -357,10 +380,14 @@ class ClaudeProvider(ProviderAdapter):
     def _parse_usage(raw_usage: object) -> TokenUsage | None:
         if not isinstance(raw_usage, dict):
             return None
-        prompt_tokens = int(raw_usage.get("input_tokens", 0)) + int(
-            raw_usage.get("cache_read_input_tokens", 0)
+        # Claude splits the prompt into uncached, cache-written, and
+        # cache-read tokens; OpenAI's prompt_tokens counts all three.
+        cached_tokens = int(raw_usage.get("cache_read_input_tokens") or 0)
+        prompt_tokens = (
+            int(raw_usage.get("input_tokens") or 0)
+            + int(raw_usage.get("cache_creation_input_tokens") or 0)
+            + cached_tokens
         )
-        cached_tokens = int(raw_usage.get("cache_read_input_tokens", 0))
         completion_tokens = int(raw_usage.get("output_tokens", 0))
         return TokenUsage(
             prompt_tokens=prompt_tokens,

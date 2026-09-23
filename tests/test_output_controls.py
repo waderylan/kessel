@@ -689,3 +689,23 @@ async def test_max_tokens_truncates_final_only_fresh_codex_text() -> None:
     assert result.finish_reason == "length"
     assert result.usage is not None
     assert result.usage.completion_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_terminated_result_reports_model_announced_by_provider() -> None:
+    from kessel_gateway.output_control import control_output_stream
+
+    async def source():
+        yield ProviderStreamEvent(model="claude-opus-5-5")
+        yield ProviderStreamEvent(delta="one two three four five six seven")
+
+    events = [
+        event
+        async for event in control_output_stream(
+            source(), requested_model="default", max_tokens=2, stop_sequences=()
+        )
+    ]
+
+    assert events[-1].result is not None
+    assert events[-1].result.finish_reason == "length"
+    assert events[-1].result.model == "claude-opus-5-5"

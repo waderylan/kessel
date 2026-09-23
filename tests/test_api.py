@@ -527,3 +527,35 @@ async def test_rate_limit_is_a_real_429(
         assert error["error"]["type"] == "rate_limit_error"
     else:
         assert error["error"]["code"] == "rate_limit_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_malformed_json_and_non_text_parts_have_clear_errors() -> None:
+    app = create_app(make_settings(), registry=FakeRegistry())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
+        malformed = await client.post(
+            "/v1/codex/chat/completions",
+            content=b"{not json",
+            headers={"Content-Type": "application/json"},
+        )
+        image = await client.post(
+            "/v1/codex/chat/completions",
+            json={
+                "model": "default",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": "data:,"}}
+                        ],
+                    }
+                ],
+            },
+        )
+
+    assert malformed.status_code == 400
+    assert malformed.json()["error"]["param"] is None
+    assert image.status_code == 400
+    assert "only text content parts are supported" in image.json()["error"]["message"]
+    assert "image_url" in image.json()["error"]["message"]

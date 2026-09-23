@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import tempfile
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
@@ -24,8 +23,11 @@ from kessel_gateway.providers.base import (
     write_output_schema,
 )
 from kessel_gateway.rate_limits import RateLimitSnapshot
-from kessel_gateway.runner import ProcessError, provider_error_from_message
-from kessel_gateway.structured import output_schema
+from kessel_gateway.runner import (
+    ProcessError,
+    provider_error_from_message,
+)
+from kessel_gateway.structured import output_schema, strict_output_schema
 
 
 class CodexProvider(ProviderAdapter):
@@ -52,16 +54,24 @@ class CodexProvider(ProviderAdapter):
 
     def __init__(self, command: str, runner) -> None:
         super().__init__(command, runner)
-        self.app_server = CodexAppServer(
-            command=command,
-            timeout_seconds=runner.timeout_seconds,
-            max_output_bytes=runner.max_output_bytes,
+        self.app_server = self._new_app_server()
+        self._one_shot_servers: set[CodexAppServer] = set()
+
+    def _new_app_server(self) -> CodexAppServer:
+        return CodexAppServer(
+            command=self.command,
+            timeout_seconds=self.runner.timeout_seconds,
+            max_output_bytes=self.runner.max_output_bytes,
             instructions_path=Path(__file__).with_name("codex_instructions.txt").resolve(),
             disabled_features=self.DISABLED_FEATURES,
         )
 
     async def close(self) -> None:
-        await self.app_server.close()
+        await asyncio.gather(
+            self.app_server.close(),
+            *(server.close() for server in tuple(self._one_shot_servers)),
+            return_exceptions=True,
+        )
 
     async def list_models(self) -> list[str]:
         return await self.app_server.list_models()
@@ -100,7 +110,7 @@ class CodexProvider(ProviderAdapter):
         prompt = build_prompt(request)
         final: ProviderResult | None = None
         app_stream = self.app_server.stream(
-            request, prompt, Path("."), output_schema(request)
+            request, prompt, Path("."), strict_output_schema(request)
         )
         async with aclosing(app_stream):
             async for event in app_stream:
@@ -149,8 +159,11 @@ class CodexProvider(ProviderAdapter):
             command.extend(
                 ["--enable", "fast_mode", "--config", 'service_tier="fast"']
             )
-        if cwd is not None:
-            schema_path = write_output_schema(request, cwd)
+        # Codex only accepts strict schemas; any other schema is enforced by
+        # the prompt and Kessel's own validation instead.
+        strict_schema = strict_output_schema(request)
+        if cwd is not None and strict_schema is not None:
+            schema_path = write_output_schema(request, cwd, strict_schema)
             if schema_path is not None:
                 command.extend(["--output-schema", str(schema_path)])
         if not uses_default_model(self.name, request.model):
@@ -166,7 +179,7 @@ class CodexProvider(ProviderAdapter):
             schema = output_schema(request)
             buffered_result: ProviderResult | None = None
             app_stream = self.app_server.stream(
-                request, prompt, Path("."), schema
+                request, prompt, Path("."), strict_output_schema(request)
             )
             async with aclosing(app_stream):
                 async for event in app_stream:
@@ -187,81 +200,22 @@ class CodexProvider(ProviderAdapter):
             yield ProviderStreamEvent(result=await self.complete(request))
             return
 
-        prompt = build_prompt(request)
-        full_text = ""
-        current_item_id: str | None = None
-        current_item_text = ""
-        usage: TokenUsage | None = None
-        completed = False
-        temporary = await asyncio.to_thread(
-            tempfile.TemporaryDirectory, prefix="kessel-codex-"
-        )
+        # `codex exec --json` only reports a message once it is finished, so
+        # stream fresh requests through a one-shot app-server instead: still a
+        # new process and a new ephemeral thread per request, but with real
+        # deltas and an interrupt as soon as the client stops reading.
+        server = self._new_app_server()
+        self._one_shot_servers.add(server)
         try:
-            cwd = Path(temporary.name)
-            command = await asyncio.to_thread(
-                self.build_command, request, cwd
+            app_stream = server.stream(
+                request, build_prompt(request), Path("."), None
             )
-            line_stream = self.runner.stream_lines(
-                command, prompt, cwd
-            )
-            async with aclosing(line_stream):
-                async for line in line_stream:
-                    if not line.strip():
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError as exc:
-                        raise ProcessError(
-                            "Codex returned invalid JSONL output"
-                        ) from exc
-                    event_type = event.get("type")
-                    if event_type in {"item.updated", "item.completed"}:
-                        item = event.get("item", {})
-                        if item.get("type") == "agent_message":
-                            item_id = item.get("id")
-                            text = item.get("text", "")
-                            if isinstance(text, str) and text:
-                                if item_id != current_item_id:
-                                    # A new agent_message item started:
-                                    # concatenate items with a blank line,
-                                    # same as the non-streaming parser.
-                                    if full_text:
-                                        full_text += "\n\n"
-                                        yield ProviderStreamEvent(delta="\n\n")
-                                    current_item_id = item_id
-                                    current_item_text = ""
-                                delta = (
-                                    text[len(current_item_text) :]
-                                    if text.startswith(current_item_text)
-                                    else text
-                                )
-                                current_item_text = (
-                                    text
-                                    if text.startswith(current_item_text)
-                                    else current_item_text + text
-                                )
-                                full_text += delta
-                                if delta:
-                                    yield ProviderStreamEvent(delta=delta)
-                    elif event_type == "turn.completed":
-                        usage = self._parse_usage(event.get("usage", {}))
-                        completed = True
-                    elif event_type in {"turn.failed", "error"}:
-                        message = event.get("message") or event.get(
-                            "error", {}
-                        ).get("message")
-                        raise provider_error_from_message(
-                            message or "Codex reported an error",
-                            provider=self.name,
-                        )
+            async with aclosing(app_stream):
+                async for event in app_stream:
+                    yield event
         finally:
-            await asyncio.to_thread(temporary.cleanup)
-
-        if not completed or not full_text:
-            raise ProcessError("Codex completed without an assistant message")
-        yield ProviderStreamEvent(
-            result=ProviderResult(text=full_text, model=request.model, usage=usage)
-        )
+            self._one_shot_servers.discard(server)
+            await server.close()
 
     def parse_output(self, output: str, requested_model: str) -> ProviderResult:
         # Concatenate every completed agent_message item in order, matching

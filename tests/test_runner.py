@@ -165,3 +165,21 @@ async def test_stream_preserves_utf8_split_across_pipe_reads(tmp_path: Path) -> 
     assert await anext(stream) == "snowman ☃"
     with pytest.raises(StopAsyncIteration):
         await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_stream_framing_volume_does_not_hit_output_limit(tmp_path: Path) -> None:
+    # Claude's stream-json framing is many times larger than the reply text;
+    # providers cap the text, so the line stream itself must not.
+    script = tmp_path / "chatty_stream.py"
+    script.write_text(
+        "for i in range(3000):\n"
+        "    print('{\"type\":\"stream_event\",\"pad\":\"' + 'x' * 80 + '\"}')\n",
+        encoding="utf-8",
+    )
+    runner = ProcessRunner(timeout_seconds=10, max_output_bytes=1_000)
+    stream = runner.stream_lines([sys.executable, str(script)], "", tmp_path)
+
+    lines = [line async for line in stream]
+
+    assert len(lines) == 3000

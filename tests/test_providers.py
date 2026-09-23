@@ -10,12 +10,15 @@ from kessel_gateway.providers.registry import ProviderRegistry
 from kessel_gateway.models import (
     ChatCompletionRequest,
     JsonSchemaDefinition,
+    ProviderResult,
+    ProviderStreamEvent,
     ResponseFormat,
 )
 from kessel_gateway.runner import (
     ProcessError,
     ProcessExitError,
     ProcessNotFoundError,
+    ProcessOutputLimitError,
     ProviderInvalidModelError,
     ProcessResult,
     ProcessRunner,
@@ -182,6 +185,28 @@ def test_claude_parser_extracts_message_and_usage() -> None:
     assert result.usage.total_tokens == 16
     assert result.usage.prompt_tokens_details is not None
     assert result.usage.prompt_tokens_details.cached_tokens == 4
+
+
+def test_claude_usage_counts_cache_creation_tokens() -> None:
+    # Live Claude Code reports most of a fresh prompt as cache creation.
+    output = json.dumps(
+        {
+            "is_error": False,
+            "result": "pong",
+            "usage": {
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 571,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 4,
+            },
+        }
+    )
+
+    result = ClaudeProvider("claude", runner()).parse_output(output, "default")
+
+    assert result.usage is not None
+    assert result.usage.prompt_tokens == 573
+    assert result.usage.total_tokens == 577
 
 
 class ClaudeAccountRunner:
@@ -363,42 +388,48 @@ def test_codex_parser_joins_multiple_agent_messages() -> None:
     assert result.text == "first\n\nsecond"
 
 
-class CodexMultiItemRunner:
-    timeout_seconds = 10
-    max_output_bytes = 1_048_576
+class OneShotAppServer:
+    """Stands in for a per-request Codex app-server in fresh streaming."""
 
-    async def stream_lines(self, command, prompt, cwd, env_overrides=None):
-        yield json.dumps(
-            {
-                "type": "item.updated",
-                "item": {"id": "item-1", "type": "agent_message", "text": "fir"},
-            }
+    def __init__(self) -> None:
+        self.closed = False
+        self.schema = "unset"
+
+    async def stream(self, request, prompt, cwd, schema):
+        self.schema = schema
+        yield ProviderStreamEvent(delta="Hel")
+        yield ProviderStreamEvent(delta="lo")
+        yield ProviderStreamEvent(
+            result=ProviderResult(text="Hello", model=request.model)
         )
-        yield json.dumps(
-            {
-                "type": "item.completed",
-                "item": {"id": "item-1", "type": "agent_message", "text": "first"},
-            }
-        )
-        yield json.dumps(
-            {
-                "type": "item.completed",
-                "item": {"id": "item-2", "type": "agent_message", "text": "second"},
-            }
-        )
-        yield json.dumps({"type": "turn.completed", "usage": {}})
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 @pytest.mark.asyncio
-async def test_codex_stream_joins_multiple_agent_messages() -> None:
-    provider = CodexProvider("codex", CodexMultiItemRunner())
+async def test_codex_fresh_stream_uses_one_shot_app_server(monkeypatch) -> None:
+    provider = CodexProvider("codex", runner())
+    servers: list[OneShotAppServer] = []
+
+    def new_server() -> OneShotAppServer:
+        servers.append(OneShotAppServer())
+        return servers[-1]
+
+    monkeypatch.setattr(provider, "_new_app_server", new_server)
 
     events = [event async for event in provider.stream(request())]
+    second = provider.stream(request())
+    assert (await anext(second)).delta == "Hel"
+    await second.aclose()
 
-    text = "".join(event.delta for event in events if event.delta)
-    assert text == "first\n\nsecond"
-    assert events[-1].result is not None
-    assert events[-1].result.text == "first\n\nsecond"
+    assert "".join(event.delta for event in events) == "Hello"
+    assert events[-1].result is not None and events[-1].result.text == "Hello"
+    # A new server per request, always closed, even when the client stops early.
+    assert len(servers) == 2
+    assert all(server.closed for server in servers)
+    assert servers[0].schema is None
+    assert provider._one_shot_servers == set()
 
 
 def test_claude_reports_model_with_most_output_tokens() -> None:
@@ -476,6 +507,52 @@ async def test_claude_stream_raises_invalid_model_error_on_rejection() -> None:
 
     with pytest.raises(ProviderInvalidModelError):
         await anext(provider.stream(request(model="claude-bogus")))
+
+
+class ClaudeLiveModelNotFoundRunner:
+    """Event shape captured from Claude Code 2.1.280 for an unknown model."""
+
+    timeout_seconds = 10
+
+    async def stream_lines(self, command, prompt, cwd, env_overrides=None):
+        message = (
+            "There's an issue with the selected model (claude-bogus). It may "
+            "not exist or you may not have access to it. Run --model to pick "
+            "a different model."
+        )
+        yield json.dumps(
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": message}]},
+                "error": "model_not_found",
+            }
+        )
+        yield json.dumps(
+            {"type": "result", "subtype": "success", "is_error": True, "result": message}
+        )
+
+
+@pytest.mark.asyncio
+async def test_claude_stream_detects_live_model_not_found_signal() -> None:
+    provider = ClaudeProvider("claude", ClaudeLiveModelNotFoundRunner())
+
+    with pytest.raises(ProviderInvalidModelError):
+        await anext(provider.stream(request(model="claude-bogus")))
+
+
+def test_claude_live_model_not_found_text_is_detected() -> None:
+    output = json.dumps(
+        {
+            "is_error": True,
+            "result": (
+                "There's an issue with the selected model (claude-bogus). It "
+                "may not exist or you may not have access to it."
+            ),
+        }
+    )
+
+    with pytest.raises(ProviderInvalidModelError):
+        ClaudeProvider("claude", runner()).parse_output(output, "claude-bogus")
 
 
 class ClaudeModelRejectionExitRunner:
@@ -558,3 +635,36 @@ def test_claude_command_skips_json_schema_when_oversized(monkeypatch) -> None:
     command = ClaudeProvider("claude", runner()).build_command(schema_request)
 
     assert "--json-schema" not in command
+
+
+class ClaudeLongReplyRunner:
+    timeout_seconds = 10
+
+    def __init__(self, max_output_bytes: int, deltas: int) -> None:
+        self.max_output_bytes = max_output_bytes
+        self.deltas = deltas
+
+    async def stream_lines(self, command, prompt, cwd, env_overrides=None):
+        for _ in range(self.deltas):
+            yield json.dumps(
+                {
+                    "type": "stream_event",
+                    "event": {
+                        "type": "content_block_delta",
+                        "delta": {"type": "text_delta", "text": "0123456789"},
+                    },
+                }
+            )
+        yield json.dumps({"type": "result", "is_error": False, "result": "0123456789" * self.deltas})
+
+
+@pytest.mark.asyncio
+async def test_claude_reply_limit_counts_text_not_framing() -> None:
+    within = ClaudeProvider("claude", ClaudeLongReplyRunner(2_000, 150))
+    events = [event async for event in within.stream(request())]
+    assert events[-1].result is not None
+    assert len(events[-1].result.text) == 1_500
+
+    over = ClaudeProvider("claude", ClaudeLongReplyRunner(1_000, 150))
+    with pytest.raises(ProcessOutputLimitError):
+        _ = [event async for event in over.stream(request())]

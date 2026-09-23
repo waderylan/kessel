@@ -75,6 +75,81 @@ def output_schema(request: ChatCompletionRequest) -> dict[str, Any] | None:
     return response_format.json_schema.schema_
 
 
+# Keywords OpenAI strict structured outputs reject.
+_NON_STRICT_KEYWORDS = frozenset(
+    {
+        "allOf",
+        "dependentRequired",
+        "dependentSchemas",
+        "else",
+        "if",
+        "not",
+        "oneOf",
+        "patternProperties",
+        "then",
+        "unevaluatedProperties",
+    }
+)
+
+
+def is_strict_schema(schema: object) -> bool:
+    """Return whether OpenAI strict structured outputs accept ``schema``.
+
+    Codex's ``--output-schema`` and app-server ``outputSchema`` reject any
+    other schema outright, e.g. a bare ``{"type": "object"}``, an optional
+    property, or an object without ``additionalProperties: false``.
+    """
+
+    return (
+        isinstance(schema, dict)
+        and schema.get("type") == "object"
+        and _is_strict_node(schema)
+    )
+
+
+def _is_strict_node(node: object) -> bool:
+    if isinstance(node, list):
+        return all(_is_strict_node(item) for item in node)
+    if not isinstance(node, dict):
+        return True
+    if _NON_STRICT_KEYWORDS & node.keys():
+        return False
+    node_type = node.get("type")
+    if (
+        node_type == "object"
+        or (isinstance(node_type, list) and "object" in node_type)
+        or "properties" in node
+    ):
+        properties = node.get("properties", {})
+        if not isinstance(properties, dict):
+            return False
+        if node.get("additionalProperties") is not False:
+            return False
+        if set(node.get("required", [])) != set(properties):
+            return False
+    for key in ("properties", "$defs", "definitions"):
+        children = node.get(key)
+        if isinstance(children, dict) and not all(
+            _is_strict_node(child) for child in children.values()
+        ):
+            return False
+    for key in ("items", "prefixItems", "anyOf"):
+        if key in node and not _is_strict_node(node[key]):
+            return False
+    return True
+
+
+def strict_output_schema(request: ChatCompletionRequest) -> dict[str, Any] | None:
+    """Return the output schema only when strict providers can enforce it.
+
+    Otherwise the schema still reaches the model through the prompt and
+    ``parse_structured_result`` still validates the reply against it.
+    """
+
+    schema = output_schema(request)
+    return schema if is_strict_schema(schema) else None
+
+
 def parse_structured_result(
     request: ChatCompletionRequest,
     result: ProviderResult,

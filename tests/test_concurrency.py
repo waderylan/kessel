@@ -300,6 +300,8 @@ async def test_provider_queue_timeout_returns_native_429(
 
     assert response.status_code == 429
     assert response.headers["retry-after"] == "1"
+    # A busy slot is not a spent subscription quota.
+    assert "Quota resets" not in response.text
     if anthropic:
         assert response.json()["error"]["type"] == "rate_limit_error"
     else:

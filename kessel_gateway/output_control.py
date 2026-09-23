@@ -233,6 +233,7 @@ async def control_output_stream(
 
     controller = TextOutputController(max_tokens, stop_sequences)
     saw_delta = False
+    reported_model = requested_model
     source_closed = False
 
     async def close_source() -> None:
@@ -250,7 +251,7 @@ async def control_output_stream(
     ) -> ProviderResult:
         return ProviderResult(
             text=controller.delivered,
-            model=base.model if base is not None else requested_model,
+            model=base.model if base is not None else reported_model,
             usage=_terminated_usage(
                 base.usage if base is not None else None,
                 controller.delivered,
@@ -261,6 +262,8 @@ async def control_output_stream(
 
     try:
         async for event in source:
+            if event.model:
+                reported_model = event.model
             if event.delta:
                 saw_delta = True
                 controlled = controller.push(event.delta)

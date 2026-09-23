@@ -117,12 +117,17 @@ def uses_default_model(provider: str, model: str) -> bool:
     return model.lower() in {"default", provider}
 
 
-def write_output_schema(request: ChatCompletionRequest, cwd: Path) -> Path | None:
+def write_output_schema(
+    request: ChatCompletionRequest,
+    cwd: Path,
+    schema: dict | None = None,
+) -> Path | None:
     """Write a provider schema inside the request's temporary directory."""
 
     import json
 
-    schema = output_schema(request)
+    if schema is None:
+        schema = output_schema(request)
     if schema is None:
         return None
     path = cwd / "output-schema.json"

@@ -67,6 +67,13 @@ class ProviderInvalidModelError(ProcessError):
     public_message = "Unknown or unsupported model"
 
 
+def check_reply_size(reply_bytes: int, limit: int | None) -> None:
+    """Raise when the reply's running UTF-8 size exceeds the output limit."""
+
+    if limit is not None and reply_bytes > limit:
+        raise ProcessOutputLimitError(f"provider output exceeded {limit} bytes")
+
+
 class ProcessExitError(ProcessError):
     def __init__(
         self, return_code: int, stderr: str, stdout: str = ""
@@ -248,7 +255,6 @@ class ProcessRunner:
             self._drain_stream(process.stderr, self.stderr_retention_bytes)
         )
         stdin_task = asyncio.create_task(self._feed_stdin(process, stdin_text))
-        stdout_bytes = 0
         started_at = time.monotonic()
         try:
             try:
@@ -268,11 +274,10 @@ class ProcessRunner:
                         ) from exc
                     if not line:
                         break
-                    stdout_bytes += len(line)
-                    if stdout_bytes > self.max_output_bytes:
-                        raise ProcessOutputLimitError(
-                            f"provider output exceeded {self.max_output_bytes} bytes"
-                        )
+                    # Lines are yielded, not retained, and each one is capped by
+                    # the stream limit. Providers cap the reply text itself,
+                    # since event framing and partial deltas can be many
+                    # times larger than the text they carry.
                     yield line.decode(
                         "utf-8", errors="replace"
                     ).rstrip("\r\n")

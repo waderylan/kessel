@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -236,3 +237,67 @@ def test_structured_result_must_match_the_envelope_schema() -> None:
             tool_request(),
             ProviderResult(text='{"kind":"function_call","name":42}', model="default"),
         )
+
+
+def test_is_strict_schema_matches_openai_strict_rules() -> None:
+    from kessel_gateway.structured import is_strict_schema
+
+    strict = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "tags": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"k": {"type": "string"}},
+                    "required": ["k"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["name", "tags"],
+        "additionalProperties": False,
+    }
+    assert is_strict_schema(strict) is True
+    assert is_strict_schema({"type": "object"}) is False
+    assert is_strict_schema({**strict, "required": ["name"]}) is False
+    assert is_strict_schema({**strict, "additionalProperties": True}) is False
+    nested_loose = {
+        **strict,
+        "properties": {**strict["properties"], "tags": {"type": "array", "items": {"type": "object"}}},
+    }
+    assert is_strict_schema(nested_loose) is False
+    assert is_strict_schema({**strict, "oneOf": [{"type": "object"}]}) is False
+    assert is_strict_schema({"type": "string"}) is False
+
+
+def test_codex_receives_output_schema_only_when_strict(tmp_path) -> None:
+    from kessel_gateway.providers.codex import CodexProvider
+
+    runner = SimpleNamespace(timeout_seconds=5, max_output_bytes=1000)
+    provider = CodexProvider("codex", runner)
+    loose = ChatCompletionRequest(
+        model="default",
+        messages=[{"role": "user", "content": "hi"}],
+        response_format={"type": "json_object"},
+    )
+    strict = ChatCompletionRequest(
+        model="default",
+        messages=[{"role": "user", "content": "hi"}],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "p",
+                "schema": {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "required": ["a"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    )
+
+    assert "--output-schema" not in provider.build_command(loose, tmp_path)
+    assert "--output-schema" in provider.build_command(strict, tmp_path)

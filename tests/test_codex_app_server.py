@@ -158,6 +158,33 @@ def test_rate_limit_snapshot_uses_most_consumed_window() -> None:
     assert snapshot.resets_at == 200
 
 
+def test_spent_window_with_credits_is_not_exhausted() -> None:
+    # Shape captured from a live edu account whose weekly window was spent
+    # while requests kept succeeding on credits.
+    raw = {
+        "limitId": "codex",
+        "primary": {"usedPercent": 0, "resetsAt": 100},
+        "secondary": {"usedPercent": 100, "resetsAt": 200},
+        "credits": {"hasCredits": True, "unlimited": False, "balance": None},
+        "rateLimitReachedType": None,
+    }
+    snapshot = CodexAppServer._parse_rate_limit(raw)
+
+    assert snapshot is not None
+    assert snapshot.remaining_percent == 0
+    assert snapshot.exhausted is False
+
+    no_credits = CodexAppServer._parse_rate_limit(
+        {**raw, "credits": {"hasCredits": False, "unlimited": False}}
+    )
+    assert no_credits is not None and no_credits.exhausted is True
+
+    reached = CodexAppServer._parse_rate_limit(
+        {**raw, "rateLimitReachedType": "rate_limit_reached"}
+    )
+    assert reached is not None and reached.exhausted is True
+
+
 class RestartProbeServer(CodexAppServer):
     def __init__(self, instructions_path: Path) -> None:
         super().__init__("codex", 2, instructions_path, ())
