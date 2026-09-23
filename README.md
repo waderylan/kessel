@@ -330,6 +330,30 @@ python benchmarks/local_overhead.py --runs 100
 | claude | fresh | xhigh | 3 | 1362 ms | 1449 ms | 1961 ms | 2011 ms |
 <!-- benchmark-table:end -->
 
+### Live testing notes
+
+These observations come from live CLI testing on Windows 11 with Codex
+`0.156.0` and Claude Code `2.1.280` in September 2026.
+
+| Measurement | Codex | Claude Code |
+| --- | --- | --- |
+| Prompt tokens for a one-word reply | About 6,200 | About 700 |
+| Fresh request, full reply | About 4–6 s | About 1.5–3 s |
+| Streamed fresh request, first text | About 10 s | About 1.5 s |
+| Warm backend, first text | About 4.5 s | Not available |
+
+- Codex adds its own base context of about 6,200 prompt tokens to every
+  request, even a one-word reply. Disabling Codex's optional `include_*`
+  instructions saves only about 200 of those tokens, so Kessel leaves them
+  unchanged.
+- The warm Codex backend removes most of Codex's per-request startup time.
+
+### Known issues
+
+- Replies that Kessel ends early because of `max_tokens` or a stop sequence
+  report `prompt_tokens: 0` (`input_tokens: 0` on the Anthropic route).
+  Tracked in [issue #1](https://github.com/waderylan/kessel/issues/1).
+
 ## Development
 
 ```powershell
