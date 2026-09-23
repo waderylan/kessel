@@ -277,8 +277,8 @@ Kessel protects a localhost service from accidental or unauthorized requests. It
 
 Controlled overrides are documented in the application settings and include `KESSEL_API_KEY`, `KESSEL_CORS_ORIGINS`, provider concurrency limits, request timeouts, and provider executable paths. Most users do not need them.
 
-See the [security audit](https://github.com/waderylan/kessel/blob/main/AUDIT.md)
-for the full threat model and verified controls.
+See the [security policy](https://github.com/waderylan/kessel/blob/main/SECURITY.md)
+for supported versions and private vulnerability reporting.
 
 ## Benchmarks
 
