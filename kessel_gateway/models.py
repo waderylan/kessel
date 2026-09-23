@@ -75,6 +75,17 @@ class FunctionTool(BaseModel):
     function: FunctionDefinition
 
 
+class NamedToolChoiceFunction(BaseModel):
+    name: str
+
+
+class NamedToolChoice(BaseModel):
+    """OpenAI object form: required, and must be this specific tool."""
+
+    type: Literal["function"]
+    function: NamedToolChoiceFunction
+
+
 class JsonSchemaDefinition(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -119,7 +130,7 @@ class ChatCompletionRequest(BaseModel):
     backend: Literal["fresh", "warm"] = "fresh"
     stream_options: StreamOptions | None = None
     tools: list[FunctionTool] = Field(default_factory=list, max_length=16)
-    tool_choice: Literal["none", "auto", "required"] = "auto"
+    tool_choice: Literal["none", "auto", "required"] | NamedToolChoice = "auto"
     parallel_tool_calls: bool = False
     response_format: ResponseFormat | None = None
     stream: bool = False
@@ -161,14 +172,30 @@ class ChatCompletionRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_tool_surface(self) -> "ChatCompletionRequest":
-        active_tools = self.tools if self.tool_choice != "none" else []
-        if len(active_tools) > 1:
-            raise ValueError("only one function tool is supported per request")
-        if active_tools and self.tool_choice != "required":
-            raise ValueError(
-                "tool_choice must be required when a function tool is supplied"
-            )
+        if isinstance(self.tool_choice, NamedToolChoice):
+            name = self.tool_choice.function.name
+            if not any(tool.function.name == name for tool in self.tools):
+                raise ValueError(
+                    "tool_choice function name must match a supplied tool"
+                )
         return self
+
+    def active_tools(self) -> list[FunctionTool]:
+        """Tools the provider may currently call, narrowed by tool_choice."""
+
+        if self.tool_choice == "none":
+            return []
+        if isinstance(self.tool_choice, NamedToolChoice):
+            name = self.tool_choice.function.name
+            return [tool for tool in self.tools if tool.function.name == name]
+        return list(self.tools)
+
+    def requires_tool_call(self) -> bool:
+        """True when the response must contain exactly one function call."""
+
+        return self.tool_choice == "required" or isinstance(
+            self.tool_choice, NamedToolChoice
+        )
 
 
 class CompletionMessage(BaseModel):
@@ -266,17 +293,28 @@ class AnthropicMessage(BaseModel):
             return self.content
         sections = []
         for block in self.content:
-            block_type = block.get("type")
-            if block_type == "text" and isinstance(block.get("text"), str):
-                sections.append(block["text"])
+            block_type = block.get("type") if isinstance(block, dict) else None
+            if block_type == "text":
+                text_value = block.get("text")
+                if not isinstance(text_value, str):
+                    raise ValueError("text content block is missing its 'text' string")
+                sections.append(text_value)
             elif block_type == "tool_result":
                 content = block.get("content", "")
                 if isinstance(content, list):
-                    content = "\n".join(
-                        part.get("text", "")
-                        for part in content
-                        if isinstance(part, dict)
-                    )
+                    parts = []
+                    for part in content:
+                        if not isinstance(part, dict) or part.get("type") != "text":
+                            actual = (
+                                part.get("type")
+                                if isinstance(part, dict)
+                                else type(part).__name__
+                            )
+                            raise ValueError(
+                                f"unsupported content block type '{actual}'"
+                            )
+                        parts.append(part.get("text", ""))
+                    content = "\n".join(parts)
                 sections.append(
                     f"Tool result for {block.get('tool_use_id', 'unknown')}: {content}"
                 )
@@ -285,6 +323,8 @@ class AnthropicMessage(BaseModel):
                     "Previous tool call: "
                     + json.dumps(block, separators=(",", ":"))
                 )
+            else:
+                raise ValueError(f"unsupported content block type '{block_type}'")
         return "\n".join(sections)
 
 
@@ -307,7 +347,7 @@ class AnthropicMessagesRequest(BaseModel):
     messages: list[AnthropicMessage] = Field(min_length=1, max_length=100)
     system: str | list[dict[str, Any]] | None = None
     stream: bool = False
-    tools: list[AnthropicTool] = Field(default_factory=list, max_length=1)
+    tools: list[AnthropicTool] = Field(default_factory=list, max_length=16)
     tool_choice: AnthropicToolChoice | None = None
     reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "low"
     backend: Literal["fresh", "warm"] = "fresh"
@@ -325,10 +365,8 @@ class AnthropicMessagesRequest(BaseModel):
         if self.tool_choice is None or self.tool_choice.type != "tool":
             return self
         selected_name = self.tool_choice.name
-        if (
-            selected_name is None
-            or len(self.tools) != 1
-            or self.tools[0].name != selected_name
+        if selected_name is None or not any(
+            tool.name == selected_name for tool in self.tools
         ):
             raise ValueError("tool_choice name must match the supplied tool")
         return self
@@ -338,11 +376,17 @@ class AnthropicMessagesRequest(BaseModel):
         if isinstance(self.system, str):
             messages.append(ChatMessage(role="system", content=self.system))
         elif isinstance(self.system, list):
-            system_text = "\n".join(
-                block.get("text", "")
-                for block in self.system
-                if block.get("type") == "text"
-            )
+            system_sections: list[str] = []
+            for block in self.system:
+                if not isinstance(block, dict) or block.get("type") != "text":
+                    block_type = (
+                        block.get("type")
+                        if isinstance(block, dict)
+                        else type(block).__name__
+                    )
+                    raise ValueError(f"unsupported content block type '{block_type}'")
+                system_sections.append(block.get("text", ""))
+            system_text = "\n".join(system_sections)
             if system_text:
                 messages.append(ChatMessage(role="system", content=system_text))
         messages.extend(
@@ -361,9 +405,19 @@ class AnthropicMessagesRequest(BaseModel):
             )
             for tool in self.tools
         ]
-        choice = self.tool_choice.type if self.tool_choice else "auto"
-        if choice in {"any", "tool"}:
+        choice_type = self.tool_choice.type if self.tool_choice else "auto"
+        choice: Literal["none", "auto", "required"] | NamedToolChoice
+        if choice_type == "any":
             choice = "required"
+        elif choice_type == "tool":
+            choice = NamedToolChoice(
+                type="function",
+                function=NamedToolChoiceFunction(name=self.tool_choice.name),
+            )
+        elif choice_type == "none":
+            choice = "none"
+        else:
+            choice = "auto"
         return ChatCompletionRequest(
             model=self.model,
             messages=messages,

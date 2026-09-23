@@ -8,15 +8,37 @@ from functools import lru_cache
 from typing import Any
 
 from kessel_gateway.models import ProviderResult, ProviderStreamEvent, TokenUsage
+from kessel_gateway.runner import ProcessError
+
+
+class TokenizerUnavailableError(ProcessError):
+    """The tiktoken encoding could not be loaded (e.g. no network on first use)."""
+
+    status_code = 503
+    error_code = "tokenizer_unavailable"
+    public_message = (
+        "Token counting data is unavailable. Connect to the internet once and "
+        "run kessel setup."
+    )
 
 
 @lru_cache(maxsize=1)
 def _encoding() -> Any:
-    """Load the exact tokenizer only when an output limit needs it."""
+    """Load the exact tokenizer only when an output limit needs it.
+
+    ``lru_cache`` does not cache raised exceptions, so a failed load (for
+    example, no network the first time tiktoken needs to download
+    ``o200k_base``) is retried on the next call instead of failing forever.
+    """
 
     import tiktoken
 
-    return tiktoken.get_encoding("o200k_base")
+    try:
+        return tiktoken.get_encoding("o200k_base")
+    except Exception as exc:
+        raise TokenizerUnavailableError(
+            f"failed to load the o200k_base tokenizer: {exc}"
+        ) from exc
 
 
 def estimate_tokens(text: str) -> int:
@@ -45,6 +67,48 @@ def _decode_token_prefix(text: str, token_limit: int) -> str:
     return prefix
 
 
+_TAIL_WINDOW_TOKENS = 16
+_FREEZE_THRESHOLD_TOKENS = 48
+
+
+class _RunningTokenCount:
+    """Track an exact token count for a growing (append-only) string cheaply.
+
+    Re-tokenizing the whole accumulated string on every chunk is quadratic in
+    the number of chunks. Instead, once a prefix has enough tokens, its count
+    is frozen and never re-tokenized; only the trailing window (the last
+    ``_TAIL_WINDOW_TOKENS`` tokens' text, plus whatever is new) is re-encoded
+    on each call, which keeps each call's work bounded.
+    """
+
+    def __init__(self) -> None:
+        self._frozen_len = 0
+        self._frozen_tokens = 0
+
+    def count(self, text: str) -> int:
+        """Return the exact token count of ``text``, a growing accumulator."""
+
+        if len(text) < self._frozen_len:
+            # Not append-only after all; drop the cache and recompute clean.
+            self._frozen_len = 0
+            self._frozen_tokens = 0
+        pending = text[self._frozen_len :]
+        pending_tokens = _encoding().encode(pending)
+        if len(pending_tokens) > _FREEZE_THRESHOLD_TOKENS:
+            pending_tokens = self._freeze(pending, pending_tokens)
+        return self._frozen_tokens + len(pending_tokens)
+
+    def _freeze(self, pending: str, pending_tokens: list[int]) -> list[int]:
+        freeze_count = len(pending_tokens) - _TAIL_WINDOW_TOKENS
+        frozen_text = _decode_token_prefix(pending, freeze_count)
+        if not frozen_text:
+            return pending_tokens
+        self._frozen_len += len(frozen_text)
+        self._frozen_tokens += len(_encoding().encode(frozen_text))
+        remaining = pending[len(frozen_text) :]
+        return _encoding().encode(remaining)
+
+
 @dataclass(frozen=True)
 class ControlledText:
     emitted: str = ""
@@ -65,6 +129,8 @@ class TextOutputController:
         self._holdback = max((len(item) for item in self.stop_sequences), default=0) - 1
         self._pending = ""
         self.delivered = ""
+        self._delivered_byte_len = 0
+        self._token_count = _RunningTokenCount()
 
     def push(self, text: str, *, final: bool = False) -> ControlledText:
         self._pending += text
@@ -115,13 +181,24 @@ class TextOutputController:
             self.delivered += text
             return text, False
 
+        new_byte_len = len(text.encode("utf-8"))
+        if self._delivered_byte_len + new_byte_len < self.max_tokens:
+            # Token count never exceeds UTF-8 byte count for this byte-level
+            # BPE, so we are provably still under the limit without having to
+            # tokenize anything.
+            self.delivered += text
+            self._delivered_byte_len += new_byte_len
+            return text, False
+
         combined = self.delivered + text
-        token_count = estimate_tokens(combined)
+        token_count = self._token_count.count(combined)
         if token_count < self.max_tokens:
             self.delivered = combined
+            self._delivered_byte_len += new_byte_len
             return text, False
         if token_count == self.max_tokens:
             self.delivered = combined
+            self._delivered_byte_len += new_byte_len
             return text, True
 
         limited = _decode_token_prefix(combined, self.max_tokens)
@@ -129,6 +206,7 @@ class TextOutputController:
             return "", True
         emitted = limited[len(self.delivered) :]
         self.delivered = limited
+        self._delivered_byte_len = len(limited.encode("utf-8"))
         return emitted, True
 
 

@@ -199,6 +199,10 @@ async function checkHealth() {
     const response = await fetch("/health");
     if (!response.ok) throw new Error("Health check failed");
     const data = await response.json();
+    if (data.status === "degraded") {
+      serviceStatus.textContent = data.message || "No provider commands found";
+      return;
+    }
     const available = Object.entries(data.providers)
       .filter(([, status]) => status.available)
       .map(([name]) => name);

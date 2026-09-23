@@ -108,7 +108,7 @@ def make_settings(api_key: str | None = None) -> Settings:
 async def test_chat_completion_uses_openai_shape() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         response = await client.post(
             "/v1/codex/chat/completions",
             json={
@@ -134,7 +134,7 @@ async def test_chat_completion_uses_openai_shape() -> None:
 async def test_reasoning_effort_defaults_to_low() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         response = await client.post(
             "/v1/codex/chat/completions",
             json={
@@ -150,7 +150,7 @@ async def test_reasoning_effort_defaults_to_low() -> None:
 async def test_streaming_uses_openai_sse_shape() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         response = await client.post(
             "/v1/claude/chat/completions",
             json={
@@ -171,7 +171,7 @@ async def test_streaming_uses_openai_sse_shape() -> None:
 async def test_configured_api_key_is_required() -> None:
     app = create_app(make_settings(api_key="secret"), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         unauthorized = await client.get("/v1/codex/models")
         authorized = await client.get(
             "/v1/codex/models",
@@ -192,7 +192,7 @@ async def test_provider_accounts_are_normalized_and_authenticated() -> None:
     app = create_app(make_settings(api_key="secret"), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://127.0.0.1:8000"
+        transport=transport, base_url="http://127.0.0.1:4880"
     ) as client:
         unauthorized = await client.get("/v1/providers/accounts")
         response = await client.get(
@@ -232,7 +232,7 @@ async def test_provider_accounts_are_normalized_and_authenticated() -> None:
 async def test_anthropic_auth_error_uses_anthropic_shape() -> None:
     app = create_app(make_settings(api_key="secret"), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         response = await client.post(
             "/v1/messages",
             headers={"x-api-key": "wrong"},
@@ -247,7 +247,7 @@ async def test_anthropic_auth_error_uses_anthropic_shape() -> None:
 async def test_unknown_provider_returns_404() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         response = await client.post(
             "/v1/unknown/chat/completions",
             json={
@@ -263,7 +263,7 @@ async def test_unknown_provider_returns_404() -> None:
 async def test_model_name_rejects_shell_metacharacters() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         response = await client.post(
             "/v1/codex/chat/completions",
             json={
@@ -280,7 +280,7 @@ async def test_model_name_rejects_shell_metacharacters() -> None:
 async def test_anthropic_messages_shape() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         response = await client.post(
             "/v1/messages",
             json={
@@ -303,7 +303,7 @@ async def test_anthropic_messages_shape() -> None:
 async def test_warm_claude_is_rejected_to_preserve_statelessness() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         response = await client.post(
             "/v1/claude/chat/completions",
             json={
@@ -327,7 +327,7 @@ async def test_unsupported_openai_controls_return_clear_400(
 ) -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         response = await client.post(
             "/v1/codex/chat/completions",
             json={
@@ -348,7 +348,7 @@ async def test_n_requires_a_strict_json_integer(value: object) -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://127.0.0.1:8000"
+        transport=transport, base_url="http://127.0.0.1:4880"
     ) as client:
         response = await client.post(
             "/v1/codex/chat/completions",
@@ -368,7 +368,7 @@ async def test_anthropic_named_tool_must_match_supplied_tool() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://127.0.0.1:8000"
+        transport=transport, base_url="http://127.0.0.1:4880"
     ) as client:
         response = await client.post(
             "/v1/messages",
@@ -390,7 +390,7 @@ async def test_anthropic_named_tool_must_match_supplied_tool() -> None:
 async def test_anthropic_errors_use_anthropic_shape() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         response = await client.post(
             "/v1/messages",
             json={
@@ -411,7 +411,7 @@ async def test_anthropic_errors_use_anthropic_shape() -> None:
 async def test_models_are_discovered_from_provider() -> None:
     app = create_app(make_settings(), registry=FakeRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         response = await client.get("/v1/codex/models")
 
     assert response.status_code == 200
@@ -443,7 +443,7 @@ async def test_incompatible_provider_returns_repairable_error() -> None:
     app = create_app(make_settings(), registry=IncompatibleRegistry())
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://127.0.0.1:8000"
+        transport=transport, base_url="http://127.0.0.1:4880"
     ) as client:
         response = await client.post(
             "/v1/codex/chat/completions",
@@ -465,7 +465,7 @@ async def test_incompatible_provider_returns_repairable_error() -> None:
 async def test_logged_out_provider_has_exact_repair_command() -> None:
     app = create_app(make_settings(), registry=LoggedOutRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         response = await client.post(
             "/v1/claude/chat/completions",
             json={
@@ -515,7 +515,7 @@ async def test_rate_limit_is_a_real_429(
 ) -> None:
     app = create_app(make_settings(), registry=RateLimitedRegistry())
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         response = await client.post(path, json=payload)
 
     assert response.status_code == 429

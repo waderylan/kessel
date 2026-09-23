@@ -8,7 +8,7 @@
       content="Send stateless prompts through local Codex and Claude Code subscriptions."
     />
     <title>Kessel local API</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260922-provider-accounts" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260922-http-hardening" />
   </head>
   <body>
     <header class="site-header">
@@ -114,7 +114,7 @@
               aria-describedby="api-key-help"
             />
             <p id="api-key-help" class="helper">
-              Leave blank unless KESSEL_API_KEY is configured.
+              Required. Run <code>kessel key --copy</code> to copy your local key.
             </p>
           </div>
 
@@ -149,7 +149,7 @@
 
           <div class="output-body" id="output-body" aria-live="polite">
             <div class="empty-state" id="empty-state">
-              <p>Output will appear here after the provider process exits.</p>
+              <p>Output appears here as soon as the provider responds.</p>
             </div>
             <div class="loading-state" id="loading-state" hidden>
               <div class="skeleton skeleton-wide"></div>
@@ -174,7 +174,7 @@
           <h2 id="endpoint-title">OpenAI client setup</h2>
           <p>Set the base URL once, then use the standard chat completions call.</p>
         </div>
-        <code id="endpoint-code">http://127.0.0.1:8000/v1/codex</code>
+        <code id="endpoint-code">/v1/codex</code>
       </section>
     </main>
 
@@ -182,6 +182,6 @@
       <p>Local only by default. Requests are not stored by Kessel.</p>
     </footer>
 
-    <script src="/static/app.js?v=20260922-provider-accounts" defer></script>
+    <script src="/static/app.js?v=20260922-http-hardening" defer></script>
   </body>
 </html>

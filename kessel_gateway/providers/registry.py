@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import math
-from collections.abc import AsyncIterator, Mapping
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import aclosing, asynccontextmanager
 
 from kessel_gateway.models import (
@@ -21,6 +22,38 @@ from kessel_gateway.runner import (
     ProviderBusyError,
     ProviderCompatibilityError,
 )
+
+
+MODEL_CACHE_TTL_SECONDS = 300.0
+MODEL_CACHE_REFRESH_SECONDS = 30.0
+
+
+class _ModelListCache:
+    """Cache one provider's discovered model list for a bounded time."""
+
+    def __init__(self) -> None:
+        self._models: list[str] | None = None
+        self._fetched_at = 0.0
+        self._lock = asyncio.Lock()
+
+    def get(self) -> list[str] | None:
+        return self._models
+
+    def age_seconds(self) -> float:
+        return time.monotonic() - self._fetched_at
+
+    async def refresh(
+        self,
+        fetch: Callable[[], Awaitable[list[str]]],
+        max_age_seconds: float = MODEL_CACHE_TTL_SECONDS,
+    ) -> list[str]:
+        async with self._lock:
+            if self._models is not None and self.age_seconds() < max_age_seconds:
+                return self._models
+            models = await fetch()
+            self._models = models
+            self._fetched_at = time.monotonic()
+            return models
 
 
 class ProviderRegistry:
@@ -43,7 +76,10 @@ class ProviderRegistry:
         }
         self._slot_wait_seconds = slot_wait_seconds
         self._shutdown_grace_seconds = shutdown_grace_seconds
-        self._inflight: set[asyncio.Task] = set()
+        self._model_caches = {
+            name: _ModelListCache() for name in self._providers
+        }
+        self._inflight: dict[object, asyncio.Future] = {}
         self._closing = False
         self._disabled: dict[str, str] = {}
 
@@ -65,34 +101,83 @@ class ProviderRegistry:
     def is_enabled(self, name: str) -> bool:
         return name not in self._disabled
 
+    def _begin_inflight(self) -> object:
+        token = object()
+        self._inflight[token] = asyncio.get_running_loop().create_future()
+        return token
+
+    def _end_inflight(self, token: object) -> None:
+        future = self._inflight.pop(token, None)
+        if future is not None and not future.done():
+            future.set_result(None)
+
+    @asynccontextmanager
+    async def _tracked(self):
+        """Track a unit of work for shutdown draining without limiting concurrency."""
+
+        if self._closing:
+            raise ProcessError("Kessel is shutting down")
+        token = self._begin_inflight()
+        try:
+            yield
+        finally:
+            self._end_inflight(token)
+
+    async def _acquire_slot(self, provider_name: str, semaphore: asyncio.Semaphore) -> None:
+        """Acquire a concurrency slot with a cancellation-safe deadline.
+
+        Avoids ``asyncio.wait_for(semaphore.acquire(), ...)``, which on Python
+        3.10/3.11 can leave a cancelled acquire's permit stranded if the
+        wrapping task is cancelled at the wrong moment. Using a plain
+        ``asyncio.wait`` over a task we own, and explicitly reconciling that
+        task's outcome afterward, avoids that race.
+        """
+
+        acquire_task = asyncio.ensure_future(semaphore.acquire())
+        try:
+            done, _ = await asyncio.wait(
+                {acquire_task}, timeout=self._slot_wait_seconds
+            )
+        except asyncio.CancelledError:
+            await self._abort_acquire(acquire_task, semaphore)
+            raise
+        if acquire_task in done and not acquire_task.cancelled():
+            return
+        await self._abort_acquire(acquire_task, semaphore)
+        raise ProviderBusyError(
+            f"{provider_name} concurrency limit reached",
+            retry_after_seconds=max(1, math.ceil(self._slot_wait_seconds)),
+        )
+
+    @staticmethod
+    async def _abort_acquire(
+        acquire_task: asyncio.Task, semaphore: asyncio.Semaphore
+    ) -> None:
+        """Cancel a pending acquire, or release its permit if it slipped through."""
+
+        if not acquire_task.done():
+            acquire_task.cancel()
+        try:
+            await acquire_task
+        except (asyncio.CancelledError, Exception):
+            return
+        semaphore.release()
+
     @asynccontextmanager
     async def _provider_slot(self, provider_name: str):
         if self._closing:
             raise ProcessError("Kessel is shutting down")
         semaphore = self._semaphores[provider_name]
-        task = asyncio.current_task()
-        if task is not None:
-            self._inflight.add(task)
+        token = self._begin_inflight()
         acquired = False
         try:
-            try:
-                await asyncio.wait_for(
-                    semaphore.acquire(), timeout=self._slot_wait_seconds
-                )
-                acquired = True
-            except asyncio.TimeoutError as exc:
-                raise ProviderBusyError(
-                    f"{provider_name} concurrency limit reached",
-                    retry_after_seconds=max(
-                        1, math.ceil(self._slot_wait_seconds)
-                    ),
-                ) from exc
+            await self._acquire_slot(provider_name, semaphore)
+            acquired = True
             if self._closing:
                 raise ProcessError("Kessel is shutting down")
             yield
         finally:
-            if task is not None:
-                self._inflight.discard(task)
+            self._end_inflight(token)
             if acquired:
                 semaphore.release()
 
@@ -116,12 +201,26 @@ class ProviderRegistry:
                         provider.observe_model(event.result.model)
                     yield event
 
+    async def _refresh_models(
+        self,
+        provider_name: str,
+        max_age_seconds: float = MODEL_CACHE_TTL_SECONDS,
+    ) -> list[str]:
+        provider = self.get(provider_name)
+        return await self._model_caches[provider_name].refresh(
+            provider.list_models, max_age_seconds
+        )
+
     async def list_models(self, provider_name: str) -> list[str]:
-        async with self._provider_slot(provider_name):
-            return await self.get(provider_name).list_models()
+        async with self._tracked():
+            cache = self._model_caches[provider_name]
+            cached = cache.get()
+            if cached is not None and cache.age_seconds() < MODEL_CACHE_TTL_SECONDS:
+                return cached
+            return await self._refresh_models(provider_name)
 
     async def account_info(self, provider_name: str) -> ProviderAccountInfo:
-        async with self._provider_slot(provider_name):
+        async with self._tracked():
             return await self.get(provider_name).account_info()
 
     async def account_infos(self) -> list[ProviderAccountInfo]:
@@ -153,52 +252,37 @@ class ProviderRegistry:
             return True
         if provider_name != "codex":
             return False
-        async with self._provider_slot(provider_name):
-            return model in await provider.list_models()
+        cache = self._model_caches[provider_name]
+        cached = cache.get()
+        if cached is not None and model in cached:
+            return True
+        if cached is not None and cache.age_seconds() < MODEL_CACHE_REFRESH_SECONDS:
+            return False
+        # An unknown model may be newly released, so refetch any list older
+        # than the short refresh interval instead of trusting the full TTL.
+        async with self._tracked():
+            refreshed = await self._refresh_models(
+                provider_name, MODEL_CACHE_REFRESH_SECONDS
+            )
+        return model in refreshed
 
     async def preflight(self, provider_name: str) -> RateLimitSnapshot | None:
-        if self._closing:
-            raise ProcessError("Kessel is shutting down")
-        task = asyncio.current_task()
-        if task is not None:
-            self._inflight.add(task)
-        try:
+        async with self._tracked():
             return await self.get(provider_name).preflight()
-        finally:
-            if task is not None:
-                self._inflight.discard(task)
 
     async def rate_limit(self, provider_name: str) -> RateLimitSnapshot | None:
-        if self._closing:
-            raise ProcessError("Kessel is shutting down")
-        task = asyncio.current_task()
-        if task is not None:
-            self._inflight.add(task)
-        try:
+        async with self._tracked():
             return await self.get(provider_name).rate_limit()
-        finally:
-            if task is not None:
-                self._inflight.discard(task)
 
     async def close(self) -> None:
         """Drain active requests, cancel stragglers, and reap provider children."""
 
         self._closing = True
-        current = asyncio.current_task()
-        active = {
-            task
-            for task in self._inflight
-            if task is not current and not task.done()
-        }
-        pending: set[asyncio.Task] = set()
-        if active:
-            _, pending = await asyncio.wait(
-                active, timeout=self._shutdown_grace_seconds
-            )
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.wait(pending, timeout=1)
+        pending_futures = [
+            future for future in self._inflight.values() if not future.done()
+        ]
+        if pending_futures:
+            await asyncio.wait(pending_futures, timeout=self._shutdown_grace_seconds)
 
         await asyncio.gather(
             *(provider.close() for provider in self._providers.values()),
@@ -211,8 +295,8 @@ class ProviderRegistry:
             *(runner.terminate_all() for runner in runners),
             return_exceptions=True,
         )
-        unfinished = {task for task in pending if not task.done()}
-        for task in unfinished:
-            task.cancel()
+        unfinished = [
+            future for future in self._inflight.values() if not future.done()
+        ]
         if unfinished:
             await asyncio.wait(unfinished, timeout=1)

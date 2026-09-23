@@ -154,7 +154,7 @@ async def test_requests_within_provider_limit_run_concurrently(
     app = create_app(make_settings(), registry=registry)
 
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:4880"
     ) as client:
         started = time.monotonic()
         responses = await asyncio.gather(
@@ -191,7 +191,7 @@ async def test_provider_limits_are_independent(tmp_path: Path) -> None:
     app = create_app(make_settings(), registry=registry)
 
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:4880"
     ) as client:
         started = time.monotonic()
         responses = await asyncio.gather(
@@ -228,7 +228,7 @@ async def test_health_remains_responsive_while_slots_are_busy(
     app = create_app(make_settings(), registry=registry)
 
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:4880"
     ) as client:
         requests = [
             asyncio.create_task(
@@ -291,7 +291,7 @@ async def test_provider_queue_timeout_returns_native_429(
     app = create_app(make_settings(), registry=registry)
 
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:4880"
     ) as client:
         first = asyncio.create_task(client.post(path, json=payload))
         await wait_for_processes(runner, 1)
@@ -473,3 +473,63 @@ async def test_shutdown_cancels_requests_and_reaps_process_groups(
 
     assert runner.active_process_count == 0
     assert not marker.exists()
+
+
+async def test_guarded_stream_close_does_not_hang_when_consumer_stops() -> None:
+    from kessel_gateway.main import GuardedStream
+
+    closed: list[bool] = []
+
+    class ConnectedRequest:
+        async def is_disconnected(self) -> bool:
+            return False
+
+    async def source():
+        try:
+            for index in range(10):
+                yield index
+        finally:
+            closed.append(True)
+
+    guarded = GuardedStream(ConnectedRequest(), source())
+    assert await anext(guarded) == 0
+    # Let the producer fill the queue and block on the next put.
+    await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(guarded.aclose(), timeout=2)
+
+    assert closed == [True]
+
+
+async def test_unknown_codex_model_refetches_list_older_than_refresh_interval(
+    monkeypatch,
+) -> None:
+    from kessel_gateway.providers import registry as registry_module
+
+    calls: list[int] = []
+
+    class ListingProvider(SimpleNamespace):
+        name = "codex"
+
+        def accepts_model(self, model: str) -> bool:
+            return False
+
+        async def list_models(self) -> list[str]:
+            calls.append(1)
+            return ["old-model"] if len(calls) == 1 else ["old-model", "new-model"]
+
+    registry = ProviderRegistry(
+        {"codex": ListingProvider(command="codex", runner=None)},
+        max_concurrent_requests=1,
+    )
+    assert await registry.accepts_model("codex", "new-model") is False
+
+    cache = registry._model_caches["codex"]
+    monkeypatch.setattr(
+        cache,
+        "age_seconds",
+        lambda: registry_module.MODEL_CACHE_REFRESH_SECONDS + 1,
+    )
+
+    assert await registry.accepts_model("codex", "new-model") is True
+    assert len(calls) == 2

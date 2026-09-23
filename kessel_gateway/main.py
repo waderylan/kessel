@@ -11,15 +11,18 @@ import shutil
 import threading
 import time
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from kessel_gateway import __version__
 from kessel_gateway.config import Settings, settings
@@ -133,6 +136,349 @@ class ProviderAvailabilityCache:
             return self._status
 
 
+_ANTHROPIC_ERROR_TYPES = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    413: "request_too_large",
+    429: "rate_limit_error",
+    529: "overloaded_error",
+}
+_OPENAI_ERROR_TYPES = {
+    401: "authentication_error",
+    403: "permission_error",
+    429: "rate_limit_error",
+}
+
+
+def build_error_content(
+    is_anthropic: bool,
+    status_code: int,
+    message: str,
+    code: str,
+    request_id: str,
+    param: str | None = None,
+) -> dict[str, object]:
+    """Build the OpenAI or Anthropic error body shape for a rejected request."""
+
+    if is_anthropic:
+        return {
+            "type": "error",
+            "error": {
+                "type": _ANTHROPIC_ERROR_TYPES.get(status_code, "api_error"),
+                "message": message,
+            },
+            "request_id": request_id,
+        }
+    error_type = _OPENAI_ERROR_TYPES.get(
+        status_code,
+        "invalid_request_error" if 400 <= status_code < 500 else "server_error",
+    )
+    return ErrorResponse(
+        error=ErrorDetail(message=message, type=error_type, code=code, param=param)
+    ).model_dump()
+
+
+class LocalHTTPGuard:
+    """Pure ASGI middleware: host/origin/size checks, request ids, and JSON logging.
+
+    Replaces the previous pair of ``BaseHTTPMiddleware`` handlers with a single
+    ASGI-level middleware so a streamed body can be buffered once and replayed
+    to the application without breaking ``http.disconnect`` delivery.
+    """
+
+    def __init__(self, app, app_settings: Settings) -> None:
+        self.app = app
+        self.settings = app_settings
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_id = f"req_local_{uuid.uuid4().hex}"
+        scope.setdefault("state", {})["request_id"] = request_id
+        path = scope.get("path", "")
+        method = scope.get("method", "")
+        is_anthropic_path = path == "/v1/messages"
+        header_values: dict[bytes, bytes] = {}
+        for key, value in scope.get("headers") or ():
+            header_values.setdefault(key, value)
+
+        def header(name: bytes) -> str | None:
+            value = header_values.get(name)
+            return value.decode("latin-1") if value is not None else None
+
+        async def reject(status_code: int, message: str, code: str) -> None:
+            content = build_error_content(
+                is_anthropic_path, status_code, message, code, request_id
+            )
+            headers = {"x-request-id": request_id}
+            if is_anthropic_path:
+                headers["request-id"] = request_id
+            response = JSONResponse(
+                status_code=status_code, content=content, headers=headers
+            )
+            await response(scope, receive, send)
+
+        allowed_hosts = {
+            f"127.0.0.1:{self.settings.listen_port}",
+            f"localhost:{self.settings.listen_port}",
+            f"[::1]:{self.settings.listen_port}",
+        }
+        host = (header(b"host") or "").lower()
+        if host not in allowed_hosts:
+            await reject(421, "Invalid Host header", "invalid_host")
+            return
+
+        origin = header(b"origin")
+        if origin is not None and origin not in self.settings.cors_origins:
+            await reject(403, "Origin is not allowed", "origin_not_allowed")
+            return
+
+        if method == "POST" and path.startswith("/v1/"):
+            media_type = (
+                (header(b"content-type") or "").split(";", 1)[0].strip().lower()
+            )
+            if media_type != "application/json":
+                await reject(
+                    415,
+                    "Content-Type must be application/json",
+                    "unsupported_media_type",
+                )
+                return
+
+        content_length_header = header(b"content-length")
+        if content_length_header is not None:
+            try:
+                declared_length = int(content_length_header)
+            except ValueError:
+                await reject(400, "Invalid Content-Length header", "invalid_request")
+                return
+            if declared_length < 0:
+                await reject(400, "Invalid Content-Length header", "invalid_request")
+                return
+            if declared_length > self.settings.max_request_bytes:
+                await reject(413, "Request body is too large", "request_too_large")
+                return
+
+        receive_for_app = receive
+        if method in {"POST", "PUT", "PATCH"}:
+            body = bytearray()
+            oversized = False
+            disconnect_message: dict | None = None
+            while True:
+                message = await receive()
+                if message["type"] == "http.disconnect":
+                    disconnect_message = message
+                    break
+                body.extend(message.get("body", b""))
+                if len(body) > self.settings.max_request_bytes:
+                    oversized = True
+                    break
+                if not message.get("more_body", False):
+                    break
+            if oversized:
+                await reject(413, "Request body is too large", "request_too_large")
+                return
+
+            buffered_body = bytes(body)
+            replayed = False
+            disconnect_sent = disconnect_message is None
+
+            async def buffered_receive():
+                nonlocal replayed, disconnect_sent
+                if not replayed:
+                    replayed = True
+                    return {
+                        "type": "http.request",
+                        "body": buffered_body,
+                        "more_body": False,
+                    }
+                if not disconnect_sent:
+                    disconnect_sent = True
+                    return disconnect_message
+                return await receive()
+
+            receive_for_app = buffered_receive
+
+        started_at = time.monotonic()
+        REQUEST_LOGGER.info(
+            json.dumps(
+                {
+                    "event": "request.started",
+                    "request_id": request_id,
+                    "method": method,
+                    "path": path,
+                },
+                separators=(",", ":"),
+            )
+        )
+        response_state: dict[str, int] = {}
+
+        async def send_wrapper(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                response_state["status"] = message["status"]
+                headers = list(message.get("headers", []))
+                headers.append((b"x-request-id", request_id.encode("latin-1")))
+                if is_anthropic_path:
+                    headers.append((b"request-id", request_id.encode("latin-1")))
+                if path == "/" or path.startswith("/static/"):
+                    headers.append((b"cache-control", b"no-cache"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        def log(event: str) -> None:
+            REQUEST_LOGGER.info(
+                json.dumps(
+                    {
+                        "event": event,
+                        "request_id": request_id,
+                        "method": method,
+                        "path": path,
+                        "duration_ms": round(
+                            (time.monotonic() - started_at) * 1000, 1
+                        ),
+                    },
+                    separators=(",", ":"),
+                )
+            )
+
+        try:
+            await self.app(scope, receive_for_app, send_wrapper)
+        except asyncio.CancelledError:
+            log("request.cancelled")
+            raise
+        except BaseException:
+            event = "request.stream_failed" if response_state else "request.failed"
+            REQUEST_LOGGER.exception(
+                json.dumps(
+                    {
+                        "event": event,
+                        "request_id": request_id,
+                        "method": method,
+                        "path": path,
+                        "duration_ms": round(
+                            (time.monotonic() - started_at) * 1000, 1
+                        ),
+                    },
+                    separators=(",", ":"),
+                )
+            )
+            raise
+        else:
+            REQUEST_LOGGER.info(
+                json.dumps(
+                    {
+                        "event": "request.completed",
+                        "request_id": request_id,
+                        "method": method,
+                        "path": path,
+                        "status": response_state.get("status"),
+                        "duration_ms": round(
+                            (time.monotonic() - started_at) * 1000, 1
+                        ),
+                    },
+                    separators=(",", ":"),
+                )
+            )
+
+
+async def _watch_for_disconnect(raw_request: Request, task: "asyncio.Task[Any]") -> None:
+    """Poll for client disconnect and cancel the tracked task when it happens."""
+
+    while not task.done():
+        if await raw_request.is_disconnected():
+            task.cancel()
+            return
+        await asyncio.sleep(0.05)
+
+
+class GuardedStream:
+    """Iterate an async source behind one disconnect watcher for the whole request.
+
+    A single producer task pulls from ``source`` and puts items on a small
+    queue; a single watcher task polls ``request.is_disconnected()`` and
+    cancels the producer when the client goes away. This replaces creating a
+    fresh watcher (and polling loop) for every streamed event.
+    """
+
+    def __init__(self, raw_request: Request, source: AsyncIterator[Any]) -> None:
+        self._source = source
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        self._delivered_first = False
+        self._closed = False
+        self._producer_task = asyncio.create_task(self._produce())
+        self._watcher_task = asyncio.create_task(
+            _watch_for_disconnect(raw_request, self._producer_task)
+        )
+
+    async def _produce(self) -> None:
+        try:
+            async for event in self._source:
+                await self._queue.put(("event", event))
+            await self._queue.put(("done", None))
+        except asyncio.CancelledError:
+            # Never block here: after a disconnect or aclose() nobody may be
+            # reading, and a blocked put would strand the provider process.
+            if not self._closed:
+                self._offer(("disconnected", None))
+            raise
+        except Exception as exc:  # forwarded to the consumer below
+            await self._queue.put(("error", exc))
+        finally:
+            # Close the source from the task that iterated it, so provider
+            # cleanup runs even if the caller of aclose() is itself cancelled.
+            close = getattr(self._source, "aclose", None)
+            if close is not None:
+                await close()
+
+    def _offer(self, item: tuple[str, Any]) -> None:
+        while True:
+            try:
+                self._queue.put_nowait(item)
+                return
+            except asyncio.QueueFull:
+                try:
+                    self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+
+    def __aiter__(self) -> "GuardedStream":
+        return self
+
+    async def __anext__(self) -> Any:
+        kind, payload = await self._queue.get()
+        if kind == "event":
+            self._delivered_first = True
+            return payload
+        if kind == "error":
+            raise payload
+        if kind == "disconnected" and not self._delivered_first:
+            raise HTTPException(status_code=499, detail="Client disconnected")
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._producer_task.cancel()
+        self._watcher_task.cancel()
+        await asyncio.gather(
+            self._producer_task, self._watcher_task, return_exceptions=True
+        )
+        # Covers a producer cancelled before it ever started running; closing
+        # an already-closed async generator is a no-op.
+        close = getattr(self._source, "aclose", None)
+        if close is not None:
+            await close()
+
+
+async def _single_result(awaitable: Any) -> AsyncIterator[Any]:
+    yield await awaitable
+
+
 def create_registry(app_settings: Settings) -> ProviderRegistry:
     runner = ProcessRunner(
         timeout_seconds=app_settings.request_timeout_seconds,
@@ -210,162 +556,7 @@ def create_app(
             ],
         )
 
-    @application.middleware("http")
-    async def local_request_guard(request: Request, call_next):
-        request_id = getattr(request.state, "request_id", f"req_local_{uuid.uuid4().hex}")
-        request.state.request_id = request_id
-        allowed_hosts = {
-            f"127.0.0.1:{app_settings.listen_port}",
-            f"localhost:{app_settings.listen_port}",
-            f"[::1]:{app_settings.listen_port}",
-        }
-
-        def reject(status_code: int, message: str, code: str) -> JSONResponse:
-            response = error_response(request, status_code, message, code)
-            response.headers["x-request-id"] = request_id
-            if is_anthropic(request):
-                response.headers["request-id"] = request_id
-            return response
-
-        host = request.headers.get("host", "").lower()
-        if host not in allowed_hosts:
-            return reject(421, "Invalid Host header", "invalid_host")
-
-        origin = request.headers.get("origin")
-        if origin is not None and origin not in app_settings.cors_origins:
-            return reject(403, "Origin is not allowed", "origin_not_allowed")
-
-        if request.method == "POST" and request.url.path.startswith("/v1/"):
-            media_type = request.headers.get("content-type", "").split(";", 1)[0]
-            if media_type.lower().strip() != "application/json":
-                return reject(
-                    415,
-                    "Content-Type must be application/json",
-                    "unsupported_media_type",
-                )
-
-        content_length = request.headers.get("content-length")
-        if content_length is not None:
-            try:
-                declared_length = int(content_length)
-            except ValueError:
-                return reject(400, "Invalid Content-Length header", "invalid_request")
-            if declared_length < 0:
-                return reject(400, "Invalid Content-Length header", "invalid_request")
-            if declared_length > app_settings.max_request_bytes:
-                return reject(413, "Request body is too large", "request_too_large")
-
-        if request.method in {"POST", "PUT", "PATCH"}:
-            body = bytearray()
-            async for chunk in request.stream():
-                body.extend(chunk)
-                if len(body) > app_settings.max_request_bytes:
-                    return reject(
-                        413, "Request body is too large", "request_too_large"
-                    )
-            request._body = bytes(body)
-
-        return await call_next(request)
-
-    @application.middleware("http")
-    async def request_logging(request: Request, call_next):
-        request_id = f"req_local_{uuid.uuid4().hex}"
-        request.state.request_id = request_id
-        started_at = time.monotonic()
-        REQUEST_LOGGER.info(
-            json.dumps(
-                {
-                    "event": "request.started",
-                    "request_id": request_id,
-                    "method": request.method,
-                    "path": request.url.path,
-                },
-                separators=(",", ":"),
-            )
-        )
-        try:
-            response = await call_next(request)
-        except BaseException:
-            REQUEST_LOGGER.exception(
-                json.dumps(
-                    {
-                        "event": "request.failed",
-                        "request_id": request_id,
-                        "method": request.method,
-                        "path": request.url.path,
-                        "duration_ms": round(
-                            (time.monotonic() - started_at) * 1000, 1
-                        ),
-                    },
-                    separators=(",", ":"),
-                )
-            )
-            raise
-        response.headers["x-request-id"] = request_id
-        if request.url.path == "/v1/messages":
-            response.headers["request-id"] = request_id
-        if request.url.path == "/" or request.url.path.startswith("/static/"):
-            response.headers["cache-control"] = "no-cache"
-        original_body = response.body_iterator
-
-        async def logged_body():
-            completed = False
-            try:
-                async for chunk in original_body:
-                    yield chunk
-                completed = True
-            except asyncio.CancelledError:
-                REQUEST_LOGGER.info(
-                    json.dumps(
-                        {
-                            "event": "request.cancelled",
-                            "request_id": request_id,
-                            "method": request.method,
-                            "path": request.url.path,
-                            "duration_ms": round(
-                                (time.monotonic() - started_at) * 1000, 1
-                            ),
-                        },
-                        separators=(",", ":"),
-                    )
-                )
-                raise
-            except BaseException:
-                REQUEST_LOGGER.exception(
-                    json.dumps(
-                        {
-                            "event": "request.stream_failed",
-                            "request_id": request_id,
-                            "method": request.method,
-                            "path": request.url.path,
-                            "duration_ms": round(
-                                (time.monotonic() - started_at) * 1000, 1
-                            ),
-                        },
-                        separators=(",", ":"),
-                    )
-                )
-                raise
-            finally:
-                if completed:
-                    REQUEST_LOGGER.info(
-                        json.dumps(
-                            {
-                                "event": "request.completed",
-                                "request_id": request_id,
-                                "method": request.method,
-                                "path": request.url.path,
-                                "status": response.status_code,
-                                "duration_ms": round(
-                                    (time.monotonic() - started_at) * 1000, 1
-                                ),
-                            },
-                            separators=(",", ":"),
-                        )
-                    )
-
-        response.body_iterator = logged_body()
-        return response
+    application.add_middleware(LocalHTTPGuard, app_settings=app_settings)
 
     async def require_api_key(
         authorization: str | None = Header(default=None),
@@ -428,37 +619,14 @@ def create_app(
         param: str | None = None,
         headers: dict[str, str] | None = None,
     ) -> JSONResponse:
-        if is_anthropic(request):
-            anthropic_types = {
-                400: "invalid_request_error",
-                401: "authentication_error",
-                403: "permission_error",
-                404: "not_found_error",
-                413: "request_too_large",
-                429: "rate_limit_error",
-                529: "overloaded_error",
-            }
-            content = {
-                "type": "error",
-                "error": {
-                    "type": anthropic_types.get(status_code, "api_error"),
-                    "message": message,
-                },
-                "request_id": request.state.request_id,
-            }
-        else:
-            openai_types = {
-                401: "authentication_error",
-                403: "permission_error",
-                429: "rate_limit_error",
-            }
-            error_type = openai_types.get(
-                status_code,
-                "invalid_request_error"
-                if 400 <= status_code < 500
-                else "server_error",
-            )
-            content = error_content(message, error_type, code, param)
+        content = build_error_content(
+            is_anthropic(request),
+            status_code,
+            message,
+            code,
+            request.state.request_id,
+            param,
+        )
         return JSONResponse(status_code=status_code, content=content, headers=headers)
 
     @application.exception_handler(HTTPException)
@@ -502,6 +670,17 @@ def create_app(
 
     @application.exception_handler(ProcessError)
     async def provider_error_handler(request: Request, exc: ProcessError) -> JSONResponse:
+        explicit_status = getattr(exc, "status_code", None)
+        explicit_code = getattr(exc, "error_code", None)
+        if explicit_status is not None or explicit_code is not None:
+            explicit_message = getattr(exc, "public_message", None)
+            return error_response(
+                request,
+                explicit_status or 500,
+                explicit_message or "Provider request failed",
+                explicit_code or "provider_error",
+            )
+
         provider_name = (
             "claude"
             if request.url.path == "/v1/messages" or "/claude/" in request.url.path
@@ -623,21 +802,20 @@ def create_app(
             }
             for name, status in provider_status.items()
         }
-        if not any(status["available"] for status in provider_status.values()):
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "status": "error",
-                    "providers": provider_status,
-                    "message": (
-                        "No supported provider CLI is installed. Install Codex "
-                        "or Claude Code, then run `kessel setup`."
-                    ),
-                },
-            )
-        return JSONResponse(
-            content={"status": "ok", "providers": provider_status}
+        degraded = not any(
+            status["available"] for status in provider_status.values()
         )
+        content: dict[str, object] = {
+            "service": "kessel",
+            "status": "degraded" if degraded else "ok",
+            "providers": provider_status,
+        }
+        if degraded:
+            content["message"] = (
+                "No supported provider CLI is installed. Install Codex "
+                "or Claude Code, then run `kessel setup`."
+            )
+        return JSONResponse(content=content)
 
     def unsupported_parameter(parameter: str, reason: str) -> None:
         raise HTTPException(
@@ -716,36 +894,14 @@ def create_app(
             raise ProcessError("provider stream ended without a result")
         return final_result
 
-    async def await_or_disconnect(operation, raw_request: Request):
-        operation_task = asyncio.create_task(operation)
+    async def await_with_disconnect_guard(operation, raw_request: Request):
+        """Await a single coroutine behind one disconnect watcher for the request."""
 
-        async def watch_disconnect() -> None:
-            while not operation_task.done():
-                if await raw_request.is_disconnected():
-                    return
-                await asyncio.sleep(0.05)
-
-        disconnect_task = asyncio.create_task(watch_disconnect())
+        guarded = GuardedStream(raw_request, _single_result(operation))
         try:
-            done, _ = await asyncio.wait(
-                {operation_task, disconnect_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-        except BaseException:
-            operation_task.cancel()
-            disconnect_task.cancel()
-            await asyncio.gather(
-                operation_task, disconnect_task, return_exceptions=True
-            )
-            raise
-        if operation_task in done:
-            disconnect_task.cancel()
-            await asyncio.gather(disconnect_task, return_exceptions=True)
-            return await operation_task
-
-        operation_task.cancel()
-        await asyncio.gather(operation_task, return_exceptions=True)
-        raise HTTPException(status_code=499, detail="Client disconnected")
+            return await anext(guarded)
+        finally:
+            await guarded.aclose()
 
     async def preflight_headers(provider: str) -> dict[str, str]:
         snapshot = await application.state.registry.preflight(provider)
@@ -828,15 +984,14 @@ def create_app(
         if body.stream:
             completion_id = f"chatcmpl-local-{uuid.uuid4().hex}"
             created = int(time.time())
-            provider_stream = controlled_provider_stream(provider, body)
+            guarded = GuardedStream(raw_request, controlled_provider_stream(provider, body))
             try:
-                first_provider_event = await await_or_disconnect(
-                    anext(provider_stream), raw_request
-                )
+                first_provider_event = await anext(guarded)
             except StopAsyncIteration as exc:
+                await guarded.aclose()
                 raise ProcessError("provider stream ended without a result") from exc
             except BaseException:
-                await provider_stream.aclose()
+                await guarded.aclose()
                 raise
 
             async def event_stream():
@@ -868,13 +1023,8 @@ def create_app(
                 try:
                     async def provider_events():
                         yield first_provider_event
-                        while True:
-                            try:
-                                yield await await_or_disconnect(
-                                    anext(provider_stream), raw_request
-                                )
-                            except StopAsyncIteration:
-                                return
+                        async for event in guarded:
+                            yield event
 
                     async for event in provider_events():
                         if event.delta:
@@ -922,19 +1072,20 @@ def create_app(
                             yield encode(usage_chunk)
                 except ProcessError as exc:
                     rate_limited = isinstance(exc, ProviderRateLimitError)
+                    message = getattr(exc, "public_message", None) or (
+                        "Provider subscription quota is exhausted"
+                        if rate_limited
+                        else "Provider stream failed"
+                    )
                     yield encode(
                         error_content(
-                            (
-                                "Provider subscription quota is exhausted"
-                                if rate_limited
-                                else "Provider stream failed"
-                            ),
+                            message,
                             "rate_limit_error" if rate_limited else "server_error",
                             "rate_limit_exceeded" if rate_limited else "stream_error",
                         )
                     )
                 finally:
-                    await provider_stream.aclose()
+                    await guarded.aclose()
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(
@@ -945,9 +1096,10 @@ def create_app(
                     "X-Accel-Buffering": "no",
                     **headers,
                 },
+                background=BackgroundTask(guarded.aclose),
             )
 
-        result = await await_or_disconnect(
+        result = await await_with_disconnect_guard(
             controlled_completion(provider, body), raw_request
         )
         finish_reason = (
@@ -1014,15 +1166,16 @@ def create_app(
 
         message_id = f"msg_local_{uuid.uuid4().hex}"
         if body.stream:
-            provider_stream = controlled_provider_stream("claude", chat_request)
+            guarded = GuardedStream(
+                raw_request, controlled_provider_stream("claude", chat_request)
+            )
             try:
-                first_provider_event = await await_or_disconnect(
-                    anext(provider_stream), raw_request
-                )
+                first_provider_event = await anext(guarded)
             except StopAsyncIteration as exc:
+                await guarded.aclose()
                 raise ProcessError("provider stream ended without a result") from exc
             except BaseException:
-                await provider_stream.aclose()
+                await guarded.aclose()
                 raise
 
             async def anthropic_stream():
@@ -1051,13 +1204,8 @@ def create_app(
                 try:
                     async def provider_events():
                         yield first_provider_event
-                        while True:
-                            try:
-                                yield await await_or_disconnect(
-                                    anext(provider_stream), raw_request
-                                )
-                            except StopAsyncIteration:
-                                return
+                        async for event in guarded:
+                            yield event
 
                     async for event in provider_events():
                         if event.delta:
@@ -1165,6 +1313,11 @@ def create_app(
                         )
                 except ProcessError as exc:
                     rate_limited = isinstance(exc, ProviderRateLimitError)
+                    message = getattr(exc, "public_message", None) or (
+                        "Provider subscription quota is exhausted"
+                        if rate_limited
+                        else "Provider stream failed"
+                    )
                     yield encode(
                         "error",
                         {
@@ -1175,18 +1328,14 @@ def create_app(
                                     if rate_limited
                                     else "api_error"
                                 ),
-                                "message": (
-                                    "Provider subscription quota is exhausted"
-                                    if rate_limited
-                                    else "Provider stream failed"
-                                ),
+                                "message": message,
                             },
                             "request_id": raw_request.state.request_id,
                         },
                     )
                     return
                 finally:
-                    await provider_stream.aclose()
+                    await guarded.aclose()
                 yield encode("message_stop", {"type": "message_stop"})
 
             return StreamingResponse(
@@ -1197,9 +1346,10 @@ def create_app(
                     "X-Accel-Buffering": "no",
                     **headers,
                 },
+                background=BackgroundTask(guarded.aclose),
             )
 
-        result = await await_or_disconnect(
+        result = await await_with_disconnect_guard(
             controlled_completion("claude", chat_request), raw_request
         )
         usage = result.usage

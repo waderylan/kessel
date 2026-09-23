@@ -100,8 +100,8 @@ def settings(**updates) -> Settings:
     values = {
         "api_key": "audit-key",
         "cors_origins": (
-            "http://127.0.0.1:8000",
-            "http://localhost:8000",
+            "http://127.0.0.1:4880",
+            "http://localhost:4880",
         ),
         "request_timeout_seconds": 10,
         "max_concurrent_requests": 1,
@@ -120,10 +120,10 @@ async def test_host_origin_and_simple_content_type_are_rejected() -> None:
     app = create_app(settings(), registry=SecurityRegistry())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
-        base_url="http://127.0.0.1:8000",
+        base_url="http://127.0.0.1:4880",
     ) as client:
         rebinding = await client.get(
-            "/health", headers={"host": "attacker.example:8000"}
+            "/health", headers={"host": "attacker.example:4880"}
         )
         cross_origin = await client.get(
             "/health", headers={"origin": "https://attacker.example"}
@@ -153,7 +153,7 @@ async def test_declared_and_chunked_oversized_bodies_are_rejected() -> None:
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
-        base_url="http://127.0.0.1:8000",
+        base_url="http://127.0.0.1:4880",
     ) as client:
         declared = await client.post(
             "/v1/codex/chat/completions",
@@ -186,7 +186,7 @@ async def test_authentication_fails_closed_and_rotation_is_immediate(
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
-        base_url="http://127.0.0.1:8000",
+        base_url="http://127.0.0.1:4880",
     ) as client:
         old_before = await client.get(
             "/v1/claude/models", headers={"authorization": "Bearer old-key"}
@@ -211,7 +211,7 @@ async def test_authentication_fails_closed_and_rotation_is_immediate(
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=fail_closed),
-        base_url="http://127.0.0.1:8000",
+        base_url="http://127.0.0.1:4880",
     ) as client:
         response = await client.get("/v1/claude/models")
     assert response.status_code == 503
@@ -239,7 +239,7 @@ async def test_file_backed_api_key_parsing_is_cached_until_rotation(
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
-        base_url="http://127.0.0.1:8000",
+        base_url="http://127.0.0.1:4880",
     ) as client:
         first = await client.get(
             "/v1/claude/models", headers={"authorization": "Bearer old-key"}
@@ -278,7 +278,7 @@ async def test_health_provider_resolution_uses_short_ttl_cache(monkeypatch) -> N
     app = create_app(settings(), registry=SecurityRegistry())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
-        base_url="http://127.0.0.1:8000",
+        base_url="http://127.0.0.1:4880",
     ) as client:
         first = await client.get("/health")
         second = await client.get("/health")
@@ -295,13 +295,14 @@ async def test_health_requires_at_least_one_available_provider(monkeypatch) -> N
     app = create_app(settings(), registry=SecurityRegistry())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
-        base_url="http://127.0.0.1:8000",
+        base_url="http://127.0.0.1:4880",
     ) as client:
         response = await client.get("/health")
 
-    assert response.status_code == 503
+    assert response.status_code == 200
     assert response.json() == {
-        "status": "error",
+        "service": "kessel",
+        "status": "degraded",
         "providers": {
             "codex": {"available": False},
             "claude": {"available": False},
@@ -328,12 +329,13 @@ async def test_health_accepts_one_available_provider(monkeypatch) -> None:
     app = create_app(settings(), registry=registry)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
-        base_url="http://127.0.0.1:8000",
+        base_url="http://127.0.0.1:4880",
     ) as client:
         response = await client.get("/health")
 
     assert response.status_code == 200
     assert response.json() == {
+        "service": "kessel",
         "status": "ok",
         "providers": {
             "codex": {"available": False},
@@ -351,7 +353,7 @@ async def test_health_and_provider_errors_do_not_leak_details() -> None:
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
-        base_url="http://127.0.0.1:8000",
+        base_url="http://127.0.0.1:4880",
     ) as client:
         health = await client.get("/health")
         failure = await client.post(
@@ -372,7 +374,7 @@ async def test_unapproved_model_is_rejected_before_provider_execution() -> None:
     app = create_app(settings(), registry=SecurityRegistry(accepts_model=False))
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
-        base_url="http://127.0.0.1:8000",
+        base_url="http://127.0.0.1:4880",
     ) as client:
         response = await client.post(
             "/v1/claude/chat/completions",
@@ -389,7 +391,7 @@ async def test_fresh_codex_does_not_invoke_warm_rate_limit_paths() -> None:
     app = create_app(settings(), registry=registry)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
-        base_url="http://127.0.0.1:8000",
+        base_url="http://127.0.0.1:4880",
     ) as client:
         response = await client.post(
             "/v1/codex/chat/completions",
@@ -465,7 +467,7 @@ def test_blank_environment_key_does_not_disable_saved_key_reload(
 
     assert loaded.api_key == "saved-key"
     assert loaded.reload_api_key_from_config is True
-    assert "http://[::1]:8000" in loaded.cors_origins
+    assert "http://[::1]:4880" in loaded.cors_origins
 
 
 def test_systemd_escaping_handles_special_path_characters() -> None:
@@ -478,7 +480,7 @@ async def test_stream_protocol_fields_and_errors_are_safe() -> None:
     tool_app = create_app(settings(), registry=ToolRegistry())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=tool_app),
-        base_url="http://127.0.0.1:8000",
+        base_url="http://127.0.0.1:4880",
     ) as client:
         anthropic = await client.post(
             "/v1/messages",
@@ -516,7 +518,7 @@ async def test_stream_protocol_fields_and_errors_are_safe() -> None:
     error_app = create_app(settings(), registry=LateStreamErrorRegistry())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=error_app),
-        base_url="http://127.0.0.1:8000",
+        base_url="http://127.0.0.1:4880",
     ) as client:
         openai = await client.post(
             "/v1/codex/chat/completions",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -19,7 +20,7 @@ from kessel_gateway.models import (
     TokenUsage,
     ToolCall,
 )
-from kessel_gateway.output_control import control_output_stream
+from kessel_gateway.output_control import TextOutputController, control_output_stream
 from kessel_gateway import output_control
 from kessel_gateway.runner import ProcessRunner
 
@@ -132,6 +133,73 @@ def test_tokenizer_encoding_is_initialized_lazily_and_cached(monkeypatch) -> Non
         output_control._encoding.cache_clear()
 
 
+_LONG_TEXT = (
+    "The quick brown fox jumps over the lazy dog. " * 20
+    + "Café naïve résumé \U0001f600 emoji stress test. " * 10
+    + "def compute(x, y):\n    return x + y  # arithmetic\n" * 15
+)
+
+
+def _random_chunks(text: str, seed: int) -> list[str]:
+    rng = random.Random(seed)
+    chunks = []
+    remaining = text
+    while remaining:
+        size = rng.randint(1, 37)
+        chunks.append(remaining[:size])
+        remaining = remaining[size:]
+    return chunks
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4, 5])
+def test_running_token_count_matches_full_reencode_over_random_chunkings(
+    seed: int,
+) -> None:
+    chunks = _random_chunks(_LONG_TEXT, seed)
+    controller = TextOutputController(max_tokens=10**9, stop_sequences=())
+
+    delivered = ""
+    for chunk in chunks:
+        controlled = controller.push(chunk)
+        delivered += controlled.emitted
+        assert controlled.finish_reason is None
+        assert delivered == controller.delivered
+        assert output_control.estimate_tokens(delivered) == controller._token_count.count(
+            delivered
+        )
+
+    assert delivered == _LONG_TEXT
+    assert output_control.estimate_tokens(_LONG_TEXT) == controller._token_count.count(
+        _LONG_TEXT
+    )
+
+
+def test_tokenizer_unavailable_raises_and_is_retried_next_call(monkeypatch) -> None:
+    attempts = {"count": 0}
+
+    class FailingModule:
+        @staticmethod
+        def get_encoding(name: str):
+            attempts["count"] += 1
+            raise OSError("no network")
+
+    output_control._encoding.cache_clear()
+    monkeypatch.setitem(sys.modules, "tiktoken", FailingModule)
+    try:
+        with pytest.raises(output_control.TokenizerUnavailableError) as excinfo:
+            output_control.estimate_tokens("hello")
+        assert excinfo.value.status_code == 503
+        assert excinfo.value.error_code == "tokenizer_unavailable"
+        assert "kessel setup" in excinfo.value.public_message
+
+        # lru_cache must not remember a raised exception: retried on next call.
+        with pytest.raises(output_control.TokenizerUnavailableError):
+            output_control.estimate_tokens("hello")
+        assert attempts["count"] == 2
+    finally:
+        output_control._encoding.cache_clear()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("provider", "backend"),
@@ -144,7 +212,7 @@ async def test_openai_max_tokens_per_backend(
     registry = ChunkRegistry(["alpha", " beta", " gamma"])
     app = create_app(settings(), registry=registry)
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:4880") as client:
         response = await client.post(
             f"/v1/{provider}/chat/completions",
             json={
@@ -188,7 +256,7 @@ async def test_anthropic_max_tokens_streaming_and_buffered(streaming: bool) -> N
     registry = ChunkRegistry(["alpha", " beta", " gamma"])
     app = create_app(settings(), registry=registry)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:4880"
     ) as client:
         response = await client.post(
             "/v1/messages",
@@ -227,7 +295,7 @@ async def test_max_completion_tokens_alias_is_enforced() -> None:
     registry = ChunkRegistry(["alpha", " beta", " gamma"])
     app = create_app(settings(), registry=registry)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:4880"
     ) as client:
         response = await client.post(
             "/v1/codex/chat/completions",
@@ -321,7 +389,7 @@ async def test_natural_completion_under_max_tokens_is_unchanged() -> None:
     registry = ChunkRegistry(["short"])
     app = create_app(settings(), registry=registry)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:4880"
     ) as client:
         response = await client.post(
             "/v1/codex/chat/completions",
@@ -344,7 +412,7 @@ async def test_openai_stop_sequence_streaming_and_buffered(streaming: bool) -> N
     registry = ChunkRegistry(["before ST", "OP after"])
     app = create_app(settings(), registry=registry)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:4880"
     ) as client:
         response = await client.post(
             "/v1/codex/chat/completions",
@@ -383,7 +451,7 @@ async def test_anthropic_stop_sequence_field(streaming: bool) -> None:
     registry = ChunkRegistry(["before ST", "OP after"])
     app = create_app(settings(), registry=registry)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:4880"
     ) as client:
         response = await client.post(
             "/v1/messages",
@@ -416,7 +484,7 @@ async def test_anthropic_stop_sequence_field(streaming: bool) -> None:
 async def test_invalid_openai_token_limits(field: str, value: object) -> None:
     app = create_app(settings(), registry=ChunkRegistry(["hello"]))
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:4880"
     ) as client:
         response = await client.post(
             "/v1/codex/chat/completions",
@@ -437,7 +505,7 @@ async def test_invalid_openai_token_limits(field: str, value: object) -> None:
 async def test_invalid_anthropic_token_limits(value: object) -> None:
     app = create_app(settings(), registry=ChunkRegistry(["hello"]))
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:4880"
     ) as client:
         response = await client.post(
             "/v1/messages",
@@ -480,7 +548,7 @@ async def test_openai_stop_rejected_with_structured_surfaces(surface: str) -> No
 
     app = create_app(settings(), registry=ChunkRegistry(["hello"]))
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:4880"
     ) as client:
         response = await client.post("/v1/codex/chat/completions", json=payload)
 
@@ -494,7 +562,7 @@ async def test_openai_stop_rejected_with_structured_surfaces(surface: str) -> No
 async def test_anthropic_stop_rejected_with_tools() -> None:
     app = create_app(settings(), registry=ChunkRegistry(["hello"]))
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:4880"
     ) as client:
         response = await client.post(
             "/v1/messages",

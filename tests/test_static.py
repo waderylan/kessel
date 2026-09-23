@@ -13,8 +13,8 @@ def test_model_control_is_provider_aware_dropdown() -> None:
     assert "`/v1/${provider}/models`" in script
     assert 'value: "default", label: "Default (account selection)"' in script
     assert "modelRequestSequence" in script
-    assert 'app.js?v=20260922-provider-accounts' in html
-    assert 'styles.css?v=20260922-provider-accounts' in html
+    assert 'app.js?v=20260922-http-hardening' in html
+    assert 'styles.css?v=20260922-http-hardening' in html
 
 
 def test_account_status_uses_authenticated_provider_route() -> None:

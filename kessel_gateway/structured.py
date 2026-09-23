@@ -1,33 +1,69 @@
-"""Shared structured-output and single tool-call handling."""
+"""Shared structured-output and tool-call handling."""
 
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any
 
 from jsonschema.exceptions import ValidationError
 from jsonschema.validators import validator_for
 
-from kessel_gateway.models import ChatCompletionRequest, FunctionCall, ProviderResult, ToolCall
+from kessel_gateway.models import (
+    ChatCompletionRequest,
+    FunctionCall,
+    FunctionTool,
+    ProviderResult,
+    ToolCall,
+)
 from kessel_gateway.runner import ProcessError
+
+
+_CODE_FENCE = re.compile(r"\A```(?:json)?\s*\n(?P<body>.*?)\n?```\s*\Z", re.DOTALL)
+
+
+def _strip_code_fence(text: str) -> str:
+    """Strip a single surrounding markdown code fence, when the whole text is fenced."""
+
+    match = _CODE_FENCE.match(text.strip())
+    return text if match is None else match.group("body")
+
+
+def _tool_envelope(tools: list[FunctionTool], required: bool) -> dict[str, Any]:
+    """Object-rooted envelope so Codex's strict-schema --output-schema accepts it.
+
+    ``kind`` distinguishes a function call from a plain message; ``name`` and
+    ``arguments`` carry the call when ``kind`` is ``function_call``; ``content``
+    carries the reply when ``kind`` is ``message``.
+    """
+
+    kinds = ["function_call"] if required else ["function_call", "message"]
+    return {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": kinds},
+            "name": {
+                "type": ["string", "null"],
+                "enum": [tool.function.name for tool in tools] + [None],
+            },
+            "arguments": {
+                "anyOf": [tool.function.parameters for tool in tools]
+                + [{"type": "null"}]
+            },
+            "content": {"type": ["string", "null"]},
+        },
+        "required": ["kind", "name", "arguments", "content"],
+        "additionalProperties": False,
+    }
 
 
 def output_schema(request: ChatCompletionRequest) -> dict[str, Any] | None:
     """Return the schema providers should enforce for this request."""
 
-    active_tools = request.tools if request.tool_choice != "none" else []
+    active_tools = request.active_tools()
     if active_tools:
-        tool = active_tools[0]
-        return {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "enum": [tool.function.name]},
-                "arguments": tool.function.parameters,
-            },
-            "required": ["name", "arguments"],
-            "additionalProperties": False,
-        }
+        return _tool_envelope(active_tools, request.requires_tool_call())
 
     response_format = request.response_format
     if response_format is None or response_format.type == "text":
@@ -51,7 +87,7 @@ def parse_structured_result(
     if result.text is None:
         raise ProcessError("provider returned no structured output")
     try:
-        payload = json.loads(result.text)
+        payload = json.loads(_strip_code_fence(result.text))
     except json.JSONDecodeError as exc:
         raise ProcessError("provider returned invalid structured JSON") from exc
     try:
@@ -61,18 +97,41 @@ def parse_structured_result(
             "provider returned structured output that does not match the schema"
         ) from exc
 
-    active_tools = request.tools if request.tool_choice != "none" else []
+    active_tools = request.active_tools()
     if not active_tools:
         result.text = json.dumps(payload, separators=(",", ":"))
         return result
 
     if not isinstance(payload, dict):
         raise ProcessError("provider returned an invalid tool-call envelope")
+
+    kind = payload.get("kind")
+    if kind == "message":
+        content = payload.get("content")
+        if not isinstance(content, str):
+            raise ProcessError("provider returned a message without text content")
+        result.text = content
+        result.tool_calls = None
+        return result
+    if kind != "function_call":
+        raise ProcessError("provider returned an unknown tool-call envelope kind")
+
     name = payload.get("name")
     arguments = payload.get("arguments")
-    allowed_names = {tool.function.name for tool in active_tools}
-    if name not in allowed_names or not isinstance(arguments, dict):
+    tool = next(
+        (tool for tool in active_tools if tool.function.name == name), None
+    )
+    if tool is None or not isinstance(arguments, dict):
         raise ProcessError("provider returned an unknown or invalid function call")
+    try:
+        validator_for(tool.function.parameters)(tool.function.parameters).validate(
+            arguments
+        )
+    except ValidationError as exc:
+        raise ProcessError(
+            "provider returned arguments that do not match the tool's schema"
+        ) from exc
+
     result.text = None
     result.tool_calls = [
         ToolCall(

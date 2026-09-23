@@ -236,11 +236,10 @@ The local web client is available at `http://127.0.0.1:4880` while Kessel is run
 | `GET` | `/health` | Local service health |
 
 `/health` returns HTTP 200 whenever Kessel is alive, with a JSON body of the
-form `{"service": "kessel", "version": "...", "status": "ok" | "degraded",
-"providers": {...}}`. `status` is `degraded` when no configured provider is
-currently available; Kessel still answers `/v1` routes for any provider that
-is available. `/health` does not require the Kessel API key and does not
-expose account information.
+form `{"service": "kessel", "status": "ok" | "degraded", "providers": {...}}`.
+`status` is `degraded`, with an explanatory `message`, when no provider is
+currently available. `/health` does not require the Kessel API key and does
+not expose versions or account information.
 
 OpenAI-compatible clients send `Authorization: Bearer <kessel key>`. Anthropic clients send `X-API-Key: <kessel key>`. Kessel accepts either header on authenticated API routes.
 
