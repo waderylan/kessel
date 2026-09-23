@@ -425,19 +425,48 @@ async def test_child_environment_scrubs_service_secrets(
 
     assert "KESSEL_API_KEY" not in environment
     assert "OPENAI_API_KEY" not in environment
-    assert "HTTPS_PROXY" not in environment
+    # Proxy configuration is not a credential and must reach the provider CLI.
+    assert environment["HTTPS_PROXY"] == "http://proxy.invalid"
     assert environment["NO_COLOR"] == "1"
     assert "KESSEL_API_KEY" not in child_environment()
+
+
+def test_child_environment_allows_lowercase_proxy_variants(monkeypatch) -> None:
+    monkeypatch.setenv("https_proxy", "http://proxy.invalid")
+
+    # The allowlist match is case-insensitive; the OS may itself normalize
+    # the stored key's case (e.g. Windows uppercases it), so match loosely.
+    environment = {key.upper(): value for key, value in child_environment().items()}
+    assert environment["HTTPS_PROXY"] == "http://proxy.invalid"
+
+
+@pytest.mark.asyncio
+async def test_large_ndjson_line_within_limit_succeeds(tmp_path: Path) -> None:
+    # A full provider reply line routinely exceeds asyncio's default 64 KiB
+    # StreamReader limit; the runner must configure a larger one.
+    script = tmp_path / "large_line.py"
+    script.write_text(
+        "import sys\nsys.stdout.write('x' * 70000 + '\\n')\nsys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    runner = ProcessRunner(timeout_seconds=5, max_output_bytes=100_000)
+    stream = runner.stream_lines([sys.executable, str(script)], "", tmp_path)
+
+    line = await anext(stream)
+
+    assert len(line) == 70_000
 
 
 @pytest.mark.asyncio
 async def test_oversized_ndjson_line_has_bounded_error(tmp_path: Path) -> None:
     script = tmp_path / "oversized.py"
     script.write_text(
-        "import sys\nsys.stdout.write('x' * 70000 + '\\n')\nsys.stdout.flush()\n",
+        "import sys\nsys.stdout.write('x' * 2_000_000 + '\\n')\nsys.stdout.flush()\n",
         encoding="utf-8",
     )
-    runner = ProcessRunner(timeout_seconds=5, max_output_bytes=100_000)
+    runner = ProcessRunner(
+        timeout_seconds=5, max_output_bytes=100_000, max_line_bytes=100_000
+    )
     stream = runner.stream_lines([sys.executable, str(script)], "", tmp_path)
     with pytest.raises(ProcessOutputLimitError, match="oversized output line"):
         await anext(stream)

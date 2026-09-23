@@ -1,6 +1,7 @@
 from pathlib import Path
 from subprocess import CompletedProcess
 
+from kessel_gateway import executables
 from kessel_gateway.providers import health
 from kessel_gateway.providers.compatibility import capability_probes
 from kessel_gateway.user_config import UserConfig
@@ -27,13 +28,14 @@ def test_codex_npm_shim_resolves_to_native_windows_binary(
     native.parent.mkdir(parents=True)
     shim.write_text("@echo off\n", encoding="utf-8")
     native.write_bytes(b"")
-    monkeypatch.setattr(health.shutil, "which", lambda command: str(shim))
-    monkeypatch.setattr(health.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(executables.shutil, "which", lambda command: str(shim))
+    monkeypatch.setattr(executables.platform, "machine", lambda: "AMD64")
 
-    assert health._resolve_executable(str(shim)) == str(native.resolve())
+    assert executables.resolve_executable(str(shim)) == str(native.resolve())
 
 
-def test_provider_check_executes_resolved_binary(monkeypatch) -> None:
+def test_provider_check_executes_resolved_binary(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path))
     commands: list[list[str]] = []
     monkeypatch.setattr(
         health, "_resolve_executable", lambda command: "/native/codex"
@@ -70,7 +72,8 @@ def test_provider_check_executes_resolved_binary(monkeypatch) -> None:
     ]
 
 
-def test_provider_check_rejects_missing_capability(monkeypatch) -> None:
+def test_provider_check_rejects_missing_capability(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(
         health, "_resolve_executable", lambda command: "/native/codex"
     )

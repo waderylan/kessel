@@ -189,6 +189,8 @@ class CodexProvider(ProviderAdapter):
 
         prompt = build_prompt(request)
         full_text = ""
+        current_item_id: str | None = None
+        current_item_text = ""
         usage: TokenUsage | None = None
         completed = False
         temporary = await asyncio.to_thread(
@@ -216,18 +218,29 @@ class CodexProvider(ProviderAdapter):
                     if event_type in {"item.updated", "item.completed"}:
                         item = event.get("item", {})
                         if item.get("type") == "agent_message":
+                            item_id = item.get("id")
                             text = item.get("text", "")
                             if isinstance(text, str) and text:
+                                if item_id != current_item_id:
+                                    # A new agent_message item started:
+                                    # concatenate items with a blank line,
+                                    # same as the non-streaming parser.
+                                    if full_text:
+                                        full_text += "\n\n"
+                                        yield ProviderStreamEvent(delta="\n\n")
+                                    current_item_id = item_id
+                                    current_item_text = ""
                                 delta = (
-                                    text[len(full_text) :]
-                                    if text.startswith(full_text)
+                                    text[len(current_item_text) :]
+                                    if text.startswith(current_item_text)
                                     else text
                                 )
-                                full_text = (
+                                current_item_text = (
                                     text
-                                    if text.startswith(full_text)
-                                    else full_text + text
+                                    if text.startswith(current_item_text)
+                                    else current_item_text + text
                                 )
+                                full_text += delta
                                 if delta:
                                     yield ProviderStreamEvent(delta=delta)
                     elif event_type == "turn.completed":
@@ -251,7 +264,9 @@ class CodexProvider(ProviderAdapter):
         )
 
     def parse_output(self, output: str, requested_model: str) -> ProviderResult:
-        final_text: str | None = None
+        # Concatenate every completed agent_message item in order, matching
+        # the streaming path's separator so both backends behave the same.
+        message_parts: list[str] = []
         usage: TokenUsage | None = None
 
         for line in output.splitlines():
@@ -265,7 +280,9 @@ class CodexProvider(ProviderAdapter):
             if event.get("type") == "item.completed":
                 item = event.get("item", {})
                 if item.get("type") == "agent_message":
-                    final_text = item.get("text")
+                    text = item.get("text")
+                    if isinstance(text, str) and text:
+                        message_parts.append(text)
             elif event.get("type") == "turn.completed":
                 usage = self._parse_usage(event.get("usage", {}))
             elif event.get("type") in {"turn.failed", "error"}:
@@ -277,10 +294,10 @@ class CodexProvider(ProviderAdapter):
                     provider=self.name,
                 )
 
-        if not final_text:
+        if not message_parts:
             raise ProcessError("Codex completed without an assistant message")
         return ProviderResult(
-            text=final_text,
+            text="\n\n".join(message_parts),
             model=requested_model,
             usage=usage,
         )

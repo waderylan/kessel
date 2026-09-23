@@ -2,22 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-import platform
-import shutil
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 
+from kessel_gateway.executables import resolve_executable as _resolve_executable
+from kessel_gateway.process_security import child_environment
+from kessel_gateway.runner import hidden_process_options
 from kessel_gateway.providers.compatibility import (
     KNOWN_STABLE_VERSIONS,
     MINIMUM_VERSIONS,
     UnsupportedCliVersionError,
-    capability_probes,
     known_stable_install_command,
-    missing_capabilities,
-    parse_version,
-    require_minimum_version,
+    load_cached_version,
+    probe_compatibility,
+    store_cached_version,
 )
 from kessel_gateway.user_config import UserConfig
 
@@ -63,39 +63,24 @@ def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
         timeout=15,
         check=False,
         shell=False,
+        env=child_environment(),
+        **hidden_process_options(),
     )
 
 
-def _resolve_executable(command: str) -> str | None:
-    """Resolve provider commands to binaries safe for shell-free execution."""
+async def _probe(name: str, executable: str) -> str:
+    """Drive the shared async compatibility probe from sync `_check_provider`."""
 
-    executable = shutil.which(command)
-    if executable is None:
-        return None
-    shim = Path(executable)
-    if (
-        shim.stem.lower() != "codex"
-        or shim.suffix.lower() not in {".cmd", ".bat"}
-    ):
-        return executable
+    async def run(args: list[str]) -> str:
+        result = await asyncio.to_thread(_run, [executable, *args])
+        if result.returncode != 0:
+            label = "version check" if args == ["--version"] else "capability check"
+            raise UnsupportedCliVersionError(
+                f"{label} failed: {' '.join(args)}"
+            )
+        return result.stdout + result.stderr
 
-    package_root = (
-        shim.parent
-        / "node_modules"
-        / "@openai"
-        / "codex"
-        / "node_modules"
-        / "@openai"
-    )
-    arm64 = platform.machine().lower() in {"arm64", "aarch64"}
-    package = "codex-win32-arm64" if arm64 else "codex-win32-x64"
-    target = "aarch64-pc-windows-msvc" if arm64 else "x86_64-pc-windows-msvc"
-    native = (
-        package_root / package / "vendor" / target / "bin" / "codex.exe"
-    )
-    if native.is_file():
-        return str(native.resolve())
-    return executable
+    return await probe_compatibility(name, MINIMUM_VERSIONS[name], run)
 
 
 def _check_provider(
@@ -107,37 +92,35 @@ def _check_provider(
     executable = _resolve_executable(command)
     if executable is None:
         return ProviderHealth(name, display_name, False, False)
-    version = None
-    try:
-        version_result = _run([executable, "--version"])
-        version_output = version_result.stdout + version_result.stderr
-        version = parse_version(version_output)
-        require_minimum_version(version, MINIMUM_VERSIONS[name])
-        for index, probe in enumerate(capability_probes(name)):
-            help_result = _run([executable, *probe.args])
-            if help_result.returncode != 0:
-                raise UnsupportedCliVersionError(
-                    f"capability check failed: {' '.join(probe.args)}"
-                )
-            missing = missing_capabilities(
-                name, help_result.stdout + help_result.stderr, index
+
+    version = load_cached_version(name, executable)
+    if version is None:
+        try:
+            version = asyncio.run(_probe(name, executable))
+        except UnsupportedCliVersionError as exc:
+            return ProviderHealth(
+                name,
+                display_name,
+                True,
+                False,
+                version=getattr(exc, "version", None),
+                detail=str(exc),
+                executable=executable,
+                compatible=False,
             )
-            if missing:
-                raise UnsupportedCliVersionError(
-                    "missing required capabilities: " + ", ".join(missing)
-                )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return ProviderHealth(
+                name,
+                display_name,
+                True,
+                False,
+                detail=str(exc),
+                executable=executable,
+            )
+        store_cached_version(name, executable, version)
+
+    try:
         auth_result = _run([executable, *auth_args])
-    except UnsupportedCliVersionError as exc:
-        return ProviderHealth(
-            name,
-            display_name,
-            True,
-            False,
-            version=version,
-            detail=str(exc),
-            executable=executable,
-            compatible=False,
-        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return ProviderHealth(
             name,

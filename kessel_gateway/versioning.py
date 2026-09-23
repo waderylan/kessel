@@ -7,15 +7,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kessel_gateway.config import Settings
+from kessel_gateway.executables import resolve_executable
 from kessel_gateway.providers.compatibility import (
     UnsupportedCliVersionError,
-    capability_probes,
     known_stable_guidance,
-    missing_capabilities,
+    load_cached_version,
     parse_version,
+    probe_compatibility,
     require_minimum_version,
+    store_cached_version,
 )
-from kessel_gateway.runner import ProcessError, ProcessNotFoundError, ProcessRunner
+from kessel_gateway.runner import ProcessError, ProcessRunner
 
 
 @dataclass(frozen=True)
@@ -36,35 +38,29 @@ async def _inspect_cli(
     command: str,
     minimum: str,
 ) -> CliVersion | None:
-    runner = ProcessRunner(timeout_seconds=10, max_output_bytes=65_536)
-    try:
-        version_result = await runner.run([command, "--version"], "", Path("."))
-    except ProcessNotFoundError:
+    executable = await asyncio.to_thread(resolve_executable, command)
+    if executable is None:
         return None
-    except ProcessError as exc:
-        raise UnsupportedCliVersionError(
-            f"{provider} version check failed"
-        ) from exc
 
-    actual = parse_version(version_result.stdout + version_result.stderr)
-    require_minimum_version(actual, minimum)
+    cached_version = await asyncio.to_thread(
+        load_cached_version, provider, executable
+    )
+    if cached_version is not None:
+        return CliVersion(command=command, minimum=minimum, actual=cached_version)
 
-    for index, probe in enumerate(capability_probes(provider)):
+    runner = ProcessRunner(timeout_seconds=10, max_output_bytes=65_536)
+
+    async def run(args: list[str]) -> str:
         try:
-            result = await runner.run([command, *probe.args], "", Path("."))
+            result = await runner.run([executable, *args], "", Path("."))
         except ProcessError as exc:
             raise UnsupportedCliVersionError(
-                f"{provider} capability check failed"
+                f"{provider} check failed: {' '.join(args)}"
             ) from exc
-        missing = missing_capabilities(
-            provider, result.stdout + result.stderr, index
-        )
-        if missing:
-            raise UnsupportedCliVersionError(
-                f"{provider} {actual} is missing required capabilities: "
-                + ", ".join(missing)
-            )
+        return result.stdout + result.stderr
 
+    actual = await probe_compatibility(provider, minimum, run)
+    await asyncio.to_thread(store_cached_version, provider, executable, actual)
     return CliVersion(command=command, minimum=minimum, actual=actual)
 
 

@@ -60,7 +60,11 @@ async def test_missing_provider_version_is_skipped(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_newer_version_requires_declared_capabilities(monkeypatch) -> None:
+async def test_newer_version_requires_declared_capabilities(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(versioning, "resolve_executable", lambda command: command)
     calls: list[list[str]] = []
 
     async def fake_run(self, command, stdin_text, cwd, env_overrides=None):
@@ -89,7 +93,12 @@ async def test_newer_version_requires_declared_capabilities(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_newer_version_missing_capability_is_rejected(monkeypatch) -> None:
+async def test_newer_version_missing_capability_is_rejected(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(versioning, "resolve_executable", lambda command: command)
+
     async def fake_run(self, command, stdin_text, cwd, env_overrides=None):
         if command[-1] == "--version":
             return ProcessResult(stdout="codex-cli 0.156.0", stderr="")
@@ -99,6 +108,37 @@ async def test_newer_version_missing_capability_is_rejected(monkeypatch) -> None
 
     with pytest.raises(UnsupportedCliVersionError, match="missing required"):
         await versioning._inspect_cli("codex", "codex", "0.155.1")
+
+
+@pytest.mark.asyncio
+async def test_inspect_cli_caches_compatible_result(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path))
+    executable = tmp_path / "codex"
+    executable.write_text("", encoding="utf-8")
+    monkeypatch.setattr(versioning, "resolve_executable", lambda command: str(executable))
+    calls: list[list[str]] = []
+
+    async def fake_run(self, command, stdin_text, cwd, env_overrides=None):
+        calls.append(command)
+        if command[-1] == "--version":
+            return ProcessResult(stdout="codex-cli 0.156.0", stderr="")
+        probe = next(
+            probe
+            for probe in capability_probes("codex")
+            if list(probe.args) == command[1:]
+        )
+        return ProcessResult(stdout=" ".join(probe.required_markers), stderr="")
+
+    monkeypatch.setattr(versioning.ProcessRunner, "run", fake_run)
+
+    first = await versioning._inspect_cli("codex", "codex", "0.155.1")
+    second = await versioning._inspect_cli("codex", "codex", "0.155.1")
+
+    assert first == second == CliVersion(
+        command="codex", minimum="0.155.1", actual="0.156.0"
+    )
+    # The second call is served entirely from the cache: no further probes.
+    assert len(calls) == 3
 
 
 @pytest.mark.asyncio
@@ -197,3 +237,17 @@ async def test_startup_check_rejects_zero_installed_providers(monkeypatch) -> No
 
     with pytest.raises(UnsupportedCliVersionError, match="at least one"):
         await verify_cli_versions(settings)
+
+
+def test_compatibility_cache_write_failure_is_ignored(tmp_path, monkeypatch) -> None:
+    from kessel_gateway.providers import compatibility
+
+    executable = tmp_path / "codex"
+    executable.write_text("", encoding="utf-8")
+    blocker = tmp_path / "state"
+    blocker.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(blocker))
+
+    compatibility.store_cached_version("codex", str(executable), "1.0.0")
+
+    assert compatibility.load_cached_version("codex", str(executable)) is None

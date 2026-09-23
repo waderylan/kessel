@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 import signal
 import subprocess
 import time
@@ -12,11 +11,17 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from kessel_gateway.executables import resolve_executable
 from kessel_gateway.process_security import ProcessGroupGuard, child_environment
 
 
 class ProcessError(RuntimeError):
     """Base error for provider subprocess failures."""
+
+    # The HTTP layer prefers these over its generic mapping when set.
+    status_code: int | None = None
+    error_code: str | None = None
+    public_message: str | None = None
 
 
 class ProcessNotFoundError(ProcessError):
@@ -52,6 +57,14 @@ class ProviderCompatibilityError(ProcessError):
         self.provider = provider
         self.reason = reason
         super().__init__(f"{provider} CLI is incompatible: {reason}")
+
+
+class ProviderInvalidModelError(ProcessError):
+    """Raised when a provider CLI rejects the requested model."""
+
+    status_code = 400
+    error_code = "invalid_model"
+    public_message = "Unknown or unsupported model"
 
 
 class ProcessExitError(ProcessError):
@@ -137,10 +150,19 @@ class ProcessRunner:
         timeout_seconds: int,
         max_output_bytes: int,
         stderr_retention_bytes: int = 65_536,
+        max_line_bytes: int | None = None,
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.max_output_bytes = max_output_bytes
         self.stderr_retention_bytes = stderr_retention_bytes
+        # asyncio's default StreamReader limit is 64 KiB; a single provider
+        # JSON line (a full-reply `result`/`item.completed` event) routinely
+        # exceeds that, so give readline() enough room on its own.
+        self.max_line_bytes = (
+            max_line_bytes
+            if max_line_bytes is not None
+            else max(max_output_bytes, 1_048_576)
+        )
         self._processes: set[asyncio.subprocess.Process] = set()
         self._guards: dict[asyncio.subprocess.Process, ProcessGroupGuard] = {}
 
@@ -182,10 +204,9 @@ class ProcessRunner:
                 await self._kill_process_group(process)
                 raise
 
-            if (
-                stdout_capture.total_bytes + stderr_capture.total_bytes
-                > self.max_output_bytes
-            ):
+            # Stderr is retained only as a bounded tail for diagnostics and
+            # never counts toward the output limit.
+            if stdout_capture.total_bytes > self.max_output_bytes:
                 raise ProcessOutputLimitError(
                     f"provider output exceeded {self.max_output_bytes} bytes"
                 )
@@ -263,11 +284,9 @@ class ProcessRunner:
                     raise asyncio.TimeoutError
                 await asyncio.wait_for(process.wait(), timeout=remaining)
                 await stdin_task
+                # Stderr is retained only as a bounded tail and never counts
+                # toward the output limit; stdout is already bounded above.
                 stderr_capture = await stderr_task
-                if stdout_bytes + stderr_capture.total_bytes > self.max_output_bytes:
-                    raise ProcessOutputLimitError(
-                        f"provider output exceeded {self.max_output_bytes} bytes"
-                    )
                 if process.returncode != 0:
                     stderr = stderr_capture.retained.decode(
                         "utf-8", errors="replace"
@@ -303,7 +322,7 @@ class ProcessRunner:
         cwd: Path,
         env_overrides: dict[str, str] | None = None,
     ) -> asyncio.subprocess.Process:
-        executable = await asyncio.to_thread(shutil.which, command[0])
+        executable = await asyncio.to_thread(resolve_executable, command[0])
         if executable is None:
             raise ProcessNotFoundError(f"command not found: {command[0]}")
 
@@ -317,6 +336,7 @@ class ProcessRunner:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=self.max_line_bytes,
                 **provider_process_options(),
             )
         except FileNotFoundError as exc:

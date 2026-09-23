@@ -114,6 +114,41 @@ async def test_closing_stream_kills_child_process(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_large_stderr_does_not_count_toward_output_limit(tmp_path: Path) -> None:
+    script = tmp_path / "chatty_stderr.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stderr.write('e' * 200_000)\n"
+        "sys.stderr.flush()\n"
+        "print('ok')\n",
+        encoding="utf-8",
+    )
+    runner = ProcessRunner(timeout_seconds=5, max_output_bytes=1_000)
+
+    result = await runner.run([sys.executable, str(script)], "", tmp_path)
+
+    assert result.stdout.strip() == "ok"
+
+
+@pytest.mark.asyncio
+async def test_large_stderr_does_not_count_toward_stream_output_limit(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "chatty_stderr_stream.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stderr.write('e' * 200_000)\n"
+        "sys.stderr.flush()\n"
+        "print('ok')\n",
+        encoding="utf-8",
+    )
+    runner = ProcessRunner(timeout_seconds=5, max_output_bytes=1_000)
+    stream = runner.stream_lines([sys.executable, str(script)], "", tmp_path)
+
+    assert await anext(stream) == "ok"
+
+
+@pytest.mark.asyncio
 async def test_stream_preserves_utf8_split_across_pipe_reads(tmp_path: Path) -> None:
     script = tmp_path / "split_utf8.py"
     script.write_text(

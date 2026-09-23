@@ -320,7 +320,13 @@ class ConcurrentFakeAppServer(CodexAppServer):
     async def start(self) -> None:
         if self._reader_task is None:
             self._generation = 1
-            fake_process = SimpleNamespace(stdout=self._fake_stdout)
+
+            async def _noop_wait() -> int:
+                return 0
+
+            fake_process = SimpleNamespace(
+                stdout=self._fake_stdout, returncode=0, wait=_noop_wait
+            )
             self._reader_task = asyncio.create_task(
                 self._read_stdout(fake_process, self._generation)
             )

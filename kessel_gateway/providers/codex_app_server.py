@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
 import signal
 import tempfile
 import time
 from collections.abc import AsyncIterator, Sequence
+from contextlib import aclosing
 from pathlib import Path
 
 from kessel_gateway import __version__
+from kessel_gateway.executables import resolve_executable
 from kessel_gateway.models import (
     ChatCompletionRequest,
     ProviderResult,
@@ -31,6 +32,15 @@ from kessel_gateway.runner import (
     provider_process_options,
     provider_error_from_message,
 )
+
+# If no request uses this app server for this long, stop the child process.
+# It restarts lazily on the next request.
+_IDLE_SHUTDOWN_SECONDS = 600.0
+
+# At most this many automatic restarts within a rolling window; a healthy
+# server resets this budget after any turn that completes successfully.
+_RESTART_LIMIT = 3
+_RESTART_WINDOW_SECONDS = 600.0
 
 
 class CodexAppServer:
@@ -66,14 +76,22 @@ class CodexAppServer:
         self._instructions_text: str | None = None
         self._rate_limit: RateLimitSnapshot | None = None
         self._closing = False
-        self._automatic_restart_used = False
+        self._restart_times: list[float] = []
         self._generation = 0
+        self._active_requests = 0
+        self._idle_task: asyncio.Task | None = None
+        self._idle_shutdown_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         restart = self._restart_task
         current = asyncio.current_task()
         if restart is not None and restart is not current and not restart.done():
             await asyncio.shield(restart)
+        # A live request means the server is not idle. Cancelling the idle
+        # timer is safe while it sleeps; a shutdown already in progress is
+        # never interrupted halfway, so wait for it to finish instead.
+        self._cancel_idle_timer()
+        await self._wait_for_idle_shutdown()
         if self._process is not None and self._process.returncode is None:
             return
 
@@ -84,7 +102,7 @@ class CodexAppServer:
                 raise ProcessError("Codex App Server is shutting down")
 
             await self._cleanup_runtime()
-            executable = await asyncio.to_thread(shutil.which, self.command)
+            executable = await asyncio.to_thread(resolve_executable, self.command)
             if executable is None:
                 raise ProcessNotFoundError(
                     f"command not found: {self.command}"
@@ -93,11 +111,13 @@ class CodexAppServer:
             (
                 self._runtime_directory,
                 runtime_path,
-                isolated_home,
                 self._instructions_text,
             ) = await asyncio.to_thread(self._prepare_runtime)
             command = self._build_command(executable)
-            env = child_environment({"CODEX_HOME": str(isolated_home)})
+            # Run with the user's real CODEX_HOME (or Codex's own default if
+            # unset). Kessel never reads, copies, or overrides provider
+            # credentials or authentication files.
+            env = child_environment()
 
             self._generation += 1
             generation = self._generation
@@ -110,6 +130,7 @@ class CodexAppServer:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    limit=self.max_output_bytes,
                     **provider_process_options(),
                 )
                 self._process = process
@@ -152,6 +173,8 @@ class CodexAppServer:
 
     async def close(self) -> None:
         self._closing = True
+        self._cancel_idle_timer()
+        await self._wait_for_idle_shutdown()
         restart = self._restart_task
         if restart is not None and not restart.done():
             restart.cancel()
@@ -179,6 +202,24 @@ class CodexAppServer:
         await self._cleanup_runtime()
 
     async def stream(
+        self,
+        request: ChatCompletionRequest,
+        prompt: str,
+        cwd: Path,
+        schema: dict | None,
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        self._begin_activity()
+        try:
+            # Closing the outer generator (e.g. the caller stops iterating
+            # early) must close the inner one too, so its own `finally`
+            # (turn/interrupt cleanup) still runs.
+            async with aclosing(self._stream(request, prompt, cwd, schema)) as inner:
+                async for event in inner:
+                    yield event
+        finally:
+            self._end_activity()
+
+    async def _stream(
         self,
         request: ChatCompletionRequest,
         prompt: str,
@@ -228,6 +269,8 @@ class CodexAppServer:
             turn_params["outputSchema"] = schema
 
         full_text = ""
+        current_item_id: str | None = None
+        current_item_text = ""
         usage: TokenUsage | None = None
         turn_id: str | None = None
         turn_completed = False
@@ -258,7 +301,18 @@ class CodexAppServer:
                 params = message.get("params", {})
                 if method == "item/agentMessage/delta":
                     delta = params.get("delta", "")
+                    item_id = params.get("itemId")
                     if isinstance(delta, str) and delta:
+                        if item_id != current_item_id:
+                            # A new agent_message item started after we
+                            # already emitted text from a previous one:
+                            # concatenate items with a blank line.
+                            if full_text:
+                                full_text += "\n\n"
+                                yield ProviderStreamEvent(delta="\n\n")
+                            current_item_id = item_id
+                            current_item_text = ""
+                        current_item_text += delta
                         full_text += delta
                         if len(full_text.encode("utf-8")) > self.max_output_bytes:
                             raise ProcessOutputLimitError(
@@ -268,9 +322,24 @@ class CodexAppServer:
                 elif method == "item/completed":
                     item = params.get("item", {})
                     if item.get("type") == "agentMessage":
+                        item_id = item.get("id")
                         text = item.get("text", "")
-                        if isinstance(text, str) and text and not full_text:
-                            full_text = text
+                        # Only emit here when we have not already streamed
+                        # this exact item's text via delta events above.
+                        # Also match on text: deltas from servers that omit
+                        # itemId must not be repeated by the completed item.
+                        if (
+                            isinstance(text, str)
+                            and text
+                            and item_id != current_item_id
+                            and text != current_item_text
+                        ):
+                            if full_text:
+                                full_text += "\n\n"
+                                yield ProviderStreamEvent(delta="\n\n")
+                            current_item_id = item_id
+                            current_item_text = text
+                            full_text += text
                             if len(full_text.encode("utf-8")) > self.max_output_bytes:
                                 raise ProcessOutputLimitError(
                                     f"provider output exceeded {self.max_output_bytes} bytes"
@@ -289,6 +358,9 @@ class CodexAppServer:
                         error = turn.get("error") or {}
                         message_text = error.get("message") or "Codex turn failed"
                         raise provider_error_from_message(message_text)
+                    # A turn completed cleanly: the server is healthy again,
+                    # so forgive past automatic restarts.
+                    self._restart_times = []
                     break
         finally:
             self._thread_queues.pop(thread_id, None)
@@ -333,34 +405,46 @@ class CodexAppServer:
         )
 
     async def list_models(self) -> list[str]:
-        await self.start()
-        models: list[str] = []
-        cursor: str | None = None
-        while True:
-            params: dict[str, object] = {"limit": 100, "includeHidden": False}
-            if cursor is not None:
-                params["cursor"] = cursor
-            response = await self._request("model/list", params)
-            for item in response.get("data", []):
-                if not isinstance(item, dict) or item.get("hidden") is True:
-                    continue
-                model_id = item.get("id") or item.get("model")
-                if isinstance(model_id, str) and model_id:
-                    models.append(model_id)
-            cursor = response.get("nextCursor")
-            if not isinstance(cursor, str) or not cursor:
-                break
-        return list(dict.fromkeys(models))
+        self._begin_activity()
+        try:
+            await self.start()
+            models: list[str] = []
+            cursor: str | None = None
+            while True:
+                params: dict[str, object] = {"limit": 100, "includeHidden": False}
+                if cursor is not None:
+                    params["cursor"] = cursor
+                response = await self._request("model/list", params)
+                for item in response.get("data", []):
+                    if not isinstance(item, dict) or item.get("hidden") is True:
+                        continue
+                    model_id = item.get("id") or item.get("model")
+                    if isinstance(model_id, str) and model_id:
+                        models.append(model_id)
+                cursor = response.get("nextCursor")
+                if not isinstance(cursor, str) or not cursor:
+                    break
+            return list(dict.fromkeys(models))
+        finally:
+            self._end_activity()
 
     async def rate_limit(self) -> RateLimitSnapshot | None:
-        await self.start()
-        response = await self._request("account/rateLimits/read", {})
-        self._rate_limit = self._parse_rate_limit(response.get("rateLimits"))
-        return self._rate_limit
+        self._begin_activity()
+        try:
+            await self.start()
+            response = await self._request("account/rateLimits/read", {})
+            self._rate_limit = self._parse_rate_limit(response.get("rateLimits"))
+            return self._rate_limit
+        finally:
+            self._end_activity()
 
     async def account_info(self) -> dict[str, object]:
-        await self.start()
-        return await self._request("account/read", {"refreshToken": False})
+        self._begin_activity()
+        try:
+            await self.start()
+            return await self._request("account/read", {"refreshToken": False})
+        finally:
+            self._end_activity()
 
     async def _request(self, method: str, params: dict) -> dict:
         await self._ensure_running()
@@ -414,6 +498,8 @@ class CodexAppServer:
                     message = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(message, dict):
+                    continue
                 request_id = message.get("id")
                 if isinstance(request_id, int) and request_id in self._pending:
                     future = self._pending.pop(request_id)
@@ -445,38 +531,70 @@ class CodexAppServer:
                 if queue is not None:
                     try:
                         queue.put_nowait(message)
-                    except asyncio.QueueFull as exc:
-                        raise ProcessOutputLimitError(
-                            "Codex App Server event queue exceeded its limit"
-                        ) from exc
+                    except asyncio.QueueFull:
+                        # Don't kill the reader for every in-flight request
+                        # over one turn's backlog: fail only that turn and
+                        # keep reading events for everyone else.
+                        self._fail_turn_queue(queue, thread_id, turn_id)
         except asyncio.CancelledError:
             raise
         except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
             error = ProcessError(f"Codex App Server reader failed: {exc}")
+        # The reader is gone either way; never leave a live process without
+        # one, whether or not we go on to restart it.
+        if process.returncode is None:
+            await self._stop_process(process)
         if self._closing or generation != self._generation:
             return
         error = error or ProcessError(
             "Codex App Server exited unexpectedly"
         )
         self._fail_inflight(error)
-        if not self._automatic_restart_used:
-            self._automatic_restart_used = True
+        now = time.monotonic()
+        self._restart_times = [
+            when for when in self._restart_times if now - when < _RESTART_WINDOW_SECONDS
+        ]
+        if len(self._restart_times) < _RESTART_LIMIT:
+            self._restart_times.append(now)
             self._restart_task = asyncio.create_task(
                 self._restart_once(process, generation)
             )
 
+    def _fail_turn_queue(
+        self,
+        queue: asyncio.Queue,
+        thread_id: str | None,
+        turn_id: str | None,
+    ) -> None:
+        """Fail one turn's queue without touching the rest of the reader."""
+
+        while True:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        message = {
+            "method": "server/error",
+            "params": {
+                "error": {
+                    "message": "Codex App Server event queue exceeded its limit"
+                }
+            },
+        }
+        try:
+            queue.put_nowait(message)
+        except asyncio.QueueFull:
+            pass
+        if thread_id is not None and turn_id is not None:
+            self._turn_queues.pop((thread_id, turn_id), None)
+        if thread_id is not None and self._thread_queues.get(thread_id) is queue:
+            self._thread_queues.pop(thread_id, None)
+
     async def _read_stderr(self, process: asyncio.subprocess.Process) -> None:
         assert process.stderr is not None
-        total_bytes = 0
+        # Stderr is retained only as a bounded tail for diagnostics; its
+        # volume never fails in-flight requests or stops the process.
         while chunk := await process.stderr.read(65_536):
-            total_bytes += len(chunk)
-            if total_bytes > self.max_output_bytes:
-                error = ProcessOutputLimitError(
-                    f"provider output exceeded {self.max_output_bytes} bytes"
-                )
-                self._fail_inflight(error)
-                await self._stop_process(process)
-                return
             self._stderr_tail.extend(chunk)
             excess = len(self._stderr_tail) - self._stderr_retention_bytes
             if excess > 0:
@@ -492,6 +610,77 @@ class CodexAppServer:
             await self.start()
         except (ProcessError, OSError):
             return
+
+    def _begin_activity(self) -> None:
+        self._active_requests += 1
+        self._cancel_idle_timer()
+
+    def _end_activity(self) -> None:
+        self._active_requests = max(0, self._active_requests - 1)
+        if self._active_requests == 0 and not self._closing:
+            self._schedule_idle_timer()
+
+    def _schedule_idle_timer(self) -> None:
+        self._cancel_idle_timer()
+        self._idle_task = asyncio.create_task(self._idle_timer())
+
+    def _cancel_idle_timer(self) -> None:
+        task = self._idle_task
+        self._idle_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _idle_timer(self) -> None:
+        try:
+            await asyncio.sleep(_IDLE_SHUTDOWN_SECONDS)
+        except asyncio.CancelledError:
+            return
+        # Run the shutdown as its own task so cancelling this timer can never
+        # stop it partway through.
+        self._idle_task = None
+        self._idle_shutdown_task = asyncio.create_task(self._shutdown_if_idle())
+
+    async def _shutdown_if_idle(self) -> None:
+        async with self._start_lock:
+            if self._closing or self._active_requests > 0:
+                return
+            await self._shutdown_idle()
+
+    async def _wait_for_idle_shutdown(self) -> None:
+        shutdown = self._idle_shutdown_task
+        if (
+            shutdown is not None
+            and shutdown is not asyncio.current_task()
+            and not shutdown.done()
+        ):
+            await asyncio.gather(asyncio.shield(shutdown), return_exceptions=True)
+
+    async def _shutdown_idle(self) -> None:
+        """Stop the child process after a period with no in-flight request.
+
+        The next request restarts it lazily via `start()`. Guarded by
+        `_start_lock` (see `_idle_timer`) so this never races a concurrent
+        `start()` or `close()`.
+        """
+
+        self._generation += 1
+        process = self._process
+        self._process = None
+        if process is not None:
+            await self._stop_process(process)
+        tasks = [
+            task
+            for task in (self._reader_task, self._stderr_task)
+            if task is not None
+        ]
+        self._reader_task = None
+        self._stderr_task = None
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await self._cleanup_runtime()
 
     def _fail_inflight(self, error: ProcessError) -> None:
         for future in tuple(self._pending.values()):
@@ -516,27 +705,29 @@ class CodexAppServer:
 
     def _prepare_runtime(
         self,
-    ) -> tuple[tempfile.TemporaryDirectory, Path, Path, str]:
+    ) -> tuple[tempfile.TemporaryDirectory, Path, str]:
+        """Create an empty per-server cwd for threads.
+
+        This directory never contains anything from the user's real
+        CODEX_HOME; Kessel never reads, copies, or persists provider
+        credentials or authentication files.
+        """
+
         temporary = tempfile.TemporaryDirectory(
             prefix="kessel-codex-server-"
         )
         try:
             runtime_path = Path(temporary.name)
-            isolated_home = runtime_path / "home"
-            isolated_home.mkdir()
-            source_home = Path(
-                os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
-            )
-            auth_path = source_home / "auth.json"
-            if auth_path.exists():
-                shutil.copy2(auth_path, isolated_home / "auth.json")
             instructions = self.instructions_path.read_text(encoding="utf-8")
-            return temporary, runtime_path, isolated_home, instructions
+            return temporary, runtime_path, instructions
         except BaseException:
             temporary.cleanup()
             raise
 
     def _build_command(self, executable: str) -> list[str]:
+        # codex app-server has no --ignore-user-config/--ignore-rules flags
+        # (unlike `codex exec`); project_doc_max_bytes=0 keeps it from
+        # reading an AGENTS.md/project doc out of its cwd instead.
         command = [
             executable,
             "app-server",
@@ -553,6 +744,8 @@ class CodexAppServer:
             'model_reasoning_summary="none"',
             "--config",
             'model_verbosity="low"',
+            "--config",
+            "project_doc_max_bytes=0",
         ]
         for feature in self.disabled_features:
             command.extend(["--disable", feature])

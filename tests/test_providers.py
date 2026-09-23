@@ -7,11 +7,16 @@ from kessel_gateway.providers.claude import ClaudeProvider
 from kessel_gateway.providers.codex import CodexProvider
 from kessel_gateway.providers.health import ProviderHealth
 from kessel_gateway.providers.registry import ProviderRegistry
-from kessel_gateway.models import ChatCompletionRequest
+from kessel_gateway.models import (
+    ChatCompletionRequest,
+    JsonSchemaDefinition,
+    ResponseFormat,
+)
 from kessel_gateway.runner import (
     ProcessError,
     ProcessExitError,
     ProcessNotFoundError,
+    ProviderInvalidModelError,
     ProcessResult,
     ProcessRunner,
     ProviderCompatibilityError,
@@ -332,3 +337,224 @@ async def test_claude_rate_retry_becomes_rate_limit_error() -> None:
         await anext(provider.stream(request()))
 
     assert error.value.retry_after_seconds == 5
+
+
+def test_codex_parser_joins_multiple_agent_messages() -> None:
+    output = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"id": "item-1", "type": "agent_message", "text": "first"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"id": "item-2", "type": "agent_message", "text": "second"},
+                }
+            ),
+            json.dumps({"type": "turn.completed", "usage": {}}),
+        ]
+    )
+
+    result = CodexProvider("codex", runner()).parse_output(output, "default")
+
+    assert result.text == "first\n\nsecond"
+
+
+class CodexMultiItemRunner:
+    timeout_seconds = 10
+    max_output_bytes = 1_048_576
+
+    async def stream_lines(self, command, prompt, cwd, env_overrides=None):
+        yield json.dumps(
+            {
+                "type": "item.updated",
+                "item": {"id": "item-1", "type": "agent_message", "text": "fir"},
+            }
+        )
+        yield json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"id": "item-1", "type": "agent_message", "text": "first"},
+            }
+        )
+        yield json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"id": "item-2", "type": "agent_message", "text": "second"},
+            }
+        )
+        yield json.dumps({"type": "turn.completed", "usage": {}})
+
+
+@pytest.mark.asyncio
+async def test_codex_stream_joins_multiple_agent_messages() -> None:
+    provider = CodexProvider("codex", CodexMultiItemRunner())
+
+    events = [event async for event in provider.stream(request())]
+
+    text = "".join(event.delta for event in events if event.delta)
+    assert text == "first\n\nsecond"
+    assert events[-1].result is not None
+    assert events[-1].result.text == "first\n\nsecond"
+
+
+def test_claude_reports_model_with_most_output_tokens() -> None:
+    output = json.dumps(
+        {
+            "is_error": False,
+            "result": "Hello",
+            "modelUsage": {
+                "claude-haiku-4-5": {"outputTokens": 5},
+                "claude-sonnet-4-5": {"outputTokens": 200},
+            },
+        }
+    )
+
+    result = ClaudeProvider("claude", runner()).parse_output(output, "default")
+
+    assert result.model == "claude-sonnet-4-5"
+
+
+def test_claude_reports_first_model_on_tied_or_missing_usage() -> None:
+    output = json.dumps(
+        {
+            "is_error": False,
+            "result": "Hello",
+            "modelUsage": {
+                "claude-sonnet-4-5": {},
+                "claude-haiku-4-5": {"outputTokens": 0},
+            },
+        }
+    )
+
+    result = ClaudeProvider("claude", runner()).parse_output(output, "default")
+
+    assert result.model == "claude-sonnet-4-5"
+
+
+def test_claude_falls_back_to_requested_model_without_usage_map() -> None:
+    output = json.dumps({"is_error": False, "result": "Hello"})
+
+    result = ClaudeProvider("claude", runner()).parse_output(output, "requested-model")
+
+    assert result.model == "requested-model"
+
+
+def test_claude_accepts_real_model_ids_and_aliases() -> None:
+    provider = ClaudeProvider("claude", runner())
+
+    assert provider.accepts_model("claude-sonnet-4-5-20250929")
+    assert provider.accepts_model("claude-fable-5")
+    assert provider.accepts_model("sonnet")
+    assert not provider.accepts_model("gpt-4")
+
+
+def test_claude_parser_raises_invalid_model_error_on_rejection() -> None:
+    output = json.dumps(
+        {"is_error": True, "result": "Error: model not found: claude-bogus"}
+    )
+
+    with pytest.raises(ProviderInvalidModelError):
+        ClaudeProvider("claude", runner()).parse_output(output, "claude-bogus")
+
+
+class ClaudeModelRejectionResultRunner:
+    timeout_seconds = 10
+
+    async def stream_lines(self, command, prompt, cwd, env_overrides=None):
+        yield json.dumps(
+            {"type": "result", "is_error": True, "result": "unknown model requested"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_claude_stream_raises_invalid_model_error_on_rejection() -> None:
+    provider = ClaudeProvider("claude", ClaudeModelRejectionResultRunner())
+
+    with pytest.raises(ProviderInvalidModelError):
+        await anext(provider.stream(request(model="claude-bogus")))
+
+
+class ClaudeModelRejectionExitRunner:
+    timeout_seconds = 10
+    max_output_bytes = 10_000
+
+    async def run(self, command, stdin_text, cwd, env_overrides=None):
+        raise ProcessExitError(1, "Error: invalid model specified", "")
+
+
+@pytest.mark.asyncio
+async def test_claude_structured_output_raises_invalid_model_error_on_rejection() -> None:
+    provider = ClaudeProvider("claude", ClaudeModelRejectionExitRunner())
+    schema_request = request()
+    schema_request.response_format = ResponseFormat(
+        type="json_schema",
+        json_schema=JsonSchemaDefinition(
+            name="answer", schema={"type": "object"}
+        ),
+    )
+
+    with pytest.raises(ProviderInvalidModelError):
+        await provider.complete(schema_request)
+
+
+def test_claude_command_includes_json_schema_for_structured_requests(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "kessel_gateway.providers.claude.shutil.which", lambda command: "/usr/bin/claude"
+    )
+    schema_request = request()
+    schema_request.response_format = ResponseFormat(
+        type="json_schema",
+        json_schema=JsonSchemaDefinition(
+            name="answer", schema={"type": "object", "properties": {}}
+        ),
+    )
+
+    command = ClaudeProvider("claude", runner()).build_command(schema_request)
+
+    assert "--json-schema" in command
+    schema_index = command.index("--json-schema") + 1
+    assert json.loads(command[schema_index]) == {"type": "object", "properties": {}}
+    assert command[-1] == "-"
+
+
+def test_claude_command_skips_json_schema_for_cmd_shim(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "kessel_gateway.providers.claude.shutil.which",
+        lambda command: "C:/npm/claude.cmd",
+    )
+    schema_request = request()
+    schema_request.response_format = ResponseFormat(
+        type="json_schema",
+        json_schema=JsonSchemaDefinition(
+            name="answer", schema={"type": "object"}
+        ),
+    )
+
+    command = ClaudeProvider("claude", runner()).build_command(schema_request)
+
+    assert "--json-schema" not in command
+
+
+def test_claude_command_skips_json_schema_when_oversized(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "kessel_gateway.providers.claude.shutil.which", lambda command: "/usr/bin/claude"
+    )
+    huge_schema = {
+        "type": "object",
+        "properties": {f"field_{i}": {"type": "string"} for i in range(2000)},
+    }
+    schema_request = request()
+    schema_request.response_format = ResponseFormat(
+        type="json_schema",
+        json_schema=JsonSchemaDefinition(name="answer", schema=huge_schema),
+    )
+
+    command = ClaudeProvider("claude", runner()).build_command(schema_request)
+
+    assert "--json-schema" not in command
