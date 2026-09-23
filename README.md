@@ -277,7 +277,8 @@ Kessel protects a localhost service from accidental or unauthorized requests. It
 
 Controlled overrides are documented in the application settings and include `KESSEL_API_KEY`, `KESSEL_CORS_ORIGINS`, provider concurrency limits, request timeouts, and provider executable paths. Most users do not need them.
 
-See [AUDIT.md](AUDIT.md) for the full threat model and verified controls.
+See the [security audit](https://github.com/waderylan/kessel/blob/main/AUDIT.md)
+for the full threat model and verified controls.
 
 ## Benchmarks
 
@@ -328,17 +329,21 @@ Use `kessel setup` for an end-to-end provider test. `kessel serve` is an interna
 
 Kessel is an independent project and is not affiliated with, endorsed by, or
 sponsored by OpenAI or Anthropic. Review the current
-[provider terms assessment](PROVIDER_TERMS.md) before distributing Kessel or
-changing its local, single-user operating boundaries.
+[provider terms assessment](https://github.com/waderylan/kessel/blob/main/PROVIDER_TERMS.md)
+before distributing Kessel or changing its local, single-user operating
+boundaries.
 
 ## License
 
 Kessel is source-available under the
-[PolyForm Noncommercial License 1.0.0](LICENSE). Noncommercial use,
-modification, and distribution are permitted under that license. Commercial
-use is reserved exclusively to Rylan Wade. This includes selling Kessel,
+[PolyForm Noncommercial License 1.0.0](https://github.com/waderylan/kessel/blob/main/LICENSE).
+Noncommercial use, modification, and distribution are permitted under that
+license. Commercial use is reserved exclusively to Rylan Wade. This includes
+selling Kessel,
 offering paid or advertising-supported access to it, bundling it with a paid
 product or service, using it to provide paid services, or using it for the
 commercial benefit of a for-profit organization.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a contribution.
+See the
+[contribution policy](https://github.com/waderylan/kessel/blob/main/CONTRIBUTING.md)
+before proposing a contribution.
