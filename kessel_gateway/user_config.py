@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8000
+DEFAULT_PORT = 4880
 
 
 def config_directory() -> Path:
@@ -44,7 +44,8 @@ class UserConfig:
 
     @property
     def base_url(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        return f"http://{host}:{self.port}"
 
     @property
     def path(self) -> Path:
@@ -129,6 +130,15 @@ class UserConfig:
             )
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             raise ValueError(f"Invalid Kessel config at {path}: {exc}") from exc
+
+
+def effective_api_key(config: UserConfig) -> str | None:
+    """Return the API key clients and the server should use.
+
+    ``KESSEL_API_KEY`` overrides the key saved in the config file.
+    """
+
+    return os.getenv("KESSEL_API_KEY") or config.api_key
 
 
 def load_or_create_config() -> tuple[UserConfig, bool]:

@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 
 from kessel_gateway.providers.compatibility import MINIMUM_VERSIONS
-from kessel_gateway.user_config import UserConfig
+from kessel_gateway.user_config import DEFAULT_PORT, UserConfig, effective_api_key
 
 
 def _positive_int(name: str, default: int) -> int:
@@ -52,7 +52,7 @@ class Settings:
     shutdown_grace_seconds: int = 5
     max_request_bytes: int = 1_048_576
     listen_host: str = "127.0.0.1"
-    listen_port: int = 8000
+    listen_port: int = DEFAULT_PORT
     reload_api_key_from_config: bool = False
     allow_unauthenticated: bool = False
 
@@ -81,7 +81,7 @@ class Settings:
             if origin.strip()
         )
         return cls(
-            api_key=environment_key or user_config.api_key,
+            api_key=effective_api_key(user_config),
             cors_origins=origins,
             request_timeout_seconds=_positive_int(
                 "KESSEL_REQUEST_TIMEOUT_SECONDS", 300

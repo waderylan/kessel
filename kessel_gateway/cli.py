@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import copy
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -14,15 +16,24 @@ import threading
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
+from pathlib import Path
 
 from kessel_gateway import __version__
 from kessel_gateway.models import ProviderAccountInfo
 from kessel_gateway.process_security import ProcessGroupGuard
 from kessel_gateway.providers.accounts import read_provider_accounts
 from kessel_gateway.providers.health import ProviderHealth, check_providers
-from kessel_gateway.run_session import RunSession, RunSessionStore
+from kessel_gateway.run_session import (
+    RunSession,
+    RunSessionStore,
+    _process_is_running,
+)
 from kessel_gateway.service import ServiceError, ServiceManager
-from kessel_gateway.user_config import UserConfig, load_or_create_config
+from kessel_gateway.user_config import (
+    UserConfig,
+    effective_api_key,
+    load_or_create_config,
+)
 
 
 CONNECT_TARGETS = (
@@ -39,9 +50,17 @@ CONNECT_TARGETS = (
 
 def _configured() -> UserConfig:
     config = UserConfig.load()
-    if not config.api_key:
+    if not effective_api_key(config):
         raise RuntimeError("Kessel is not set up. Run: kessel setup")
     return config
+
+
+def _default_provider(config: UserConfig) -> str:
+    codex_set = bool(config.codex_command)
+    claude_set = bool(config.claude_command)
+    if codex_set and not claude_set:
+        return "codex"
+    return "claude"
 
 
 def _shell_value(value: str, shell: str) -> str:
@@ -53,11 +72,12 @@ def _shell_value(value: str, shell: str) -> str:
 
 
 def render_env(config: UserConfig, provider: str, shell: str) -> str:
+    key = effective_api_key(config) or ""
     values = {
         "OPENAI_BASE_URL": f"{config.base_url}/v1/{provider}",
-        "OPENAI_API_KEY": config.api_key or "",
+        "OPENAI_API_KEY": key,
         "ANTHROPIC_BASE_URL": config.base_url,
-        "ANTHROPIC_API_KEY": config.api_key or "",
+        "ANTHROPIC_API_KEY": key,
     }
     if shell == "powershell":
         return "\n".join(
@@ -75,15 +95,20 @@ def render_env(config: UserConfig, provider: str, shell: str) -> str:
     )
 
 
-def render_connect(config: UserConfig, target: str) -> str:
-    key = config.api_key or ""
-    openai_url = f"{config.base_url}/v1/claude"
+def render_connect(config: UserConfig, provider: str, target: str) -> str:
+    key = effective_api_key(config) or ""
+    openai_url = f"{config.base_url}/v1/{provider}"
     root_url = config.base_url
+    anthropic_note = (
+        "\n\nNote: Anthropic SDK routes always use Claude Code."
+        if provider == "codex"
+        else ""
+    )
     snippets = {
         "openai-python": f'''Paste into your Python code:\n\nfrom openai import OpenAI\n\nclient = OpenAI(\n    base_url="{openai_url}",\n    api_key="{key}",\n)\n\nresponse = client.chat.completions.create(\n    model="default",\n    messages=[{{"role": "user", "content": "Hello"}}],\n)''',
         "openai-node": f'''Paste into your Node.js code:\n\nimport OpenAI from "openai";\n\nconst client = new OpenAI({{\n  baseURL: "{openai_url}",\n  apiKey: "{key}",\n}});\n\nconst response = await client.chat.completions.create({{\n  model: "default",\n  messages: [{{ role: "user", content: "Hello" }}],\n}});''',
-        "anthropic-python": f'''Paste into your Python code:\n\nfrom anthropic import Anthropic\n\nclient = Anthropic(\n    base_url="{root_url}",\n    api_key="{key}",\n)\n\nmessage = client.messages.create(\n    model="default",\n    max_tokens=256,\n    messages=[{{"role": "user", "content": "Hello"}}],\n)''',
-        "anthropic-node": f'''Paste into your Node.js code:\n\nimport Anthropic from "@anthropic-ai/sdk";\n\nconst client = new Anthropic({{\n  baseURL: "{root_url}",\n  apiKey: "{key}",\n}});\n\nconst message = await client.messages.create({{\n  model: "default",\n  max_tokens: 256,\n  messages: [{{ role: "user", content: "Hello" }}],\n}});''',
+        "anthropic-python": f'''Paste into your Python code:\n\nfrom anthropic import Anthropic\n\nclient = Anthropic(\n    base_url="{root_url}",\n    api_key="{key}",\n)\n\nmessage = client.messages.create(\n    model="default",\n    max_tokens=256,\n    messages=[{{"role": "user", "content": "Hello"}}],\n){anthropic_note}''',
+        "anthropic-node": f'''Paste into your Node.js code:\n\nimport Anthropic from "@anthropic-ai/sdk";\n\nconst client = new Anthropic({{\n  baseURL: "{root_url}",\n  apiKey: "{key}",\n}});\n\nconst message = await client.messages.create({{\n  model: "default",\n  max_tokens: 256,\n  messages: [{{ role: "user", content: "Hello" }}],\n}});{anthropic_note}''',
         "curl": f'''Paste into a terminal:\n\ncurl {openai_url}/chat/completions \\\n  -H "Authorization: Bearer {key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{{"model":"default","messages":[{{"role":"user","content":"Hello"}}]}}' ''',
         "cursor": f'''Paste these values in Cursor Settings > Models > Add Custom Model:\n\nModel name: default\nOverride OpenAI Base URL: {openai_url}\nOpenAI API Key: {key}''',
         "continue": f'''Paste into ~/.continue/config.yaml:\n\nname: Kessel\nversion: 0.0.1\nschema: v1\nmodels:\n  - name: Kessel Claude\n    provider: openai\n    model: default\n    apiBase: {openai_url}\n    apiKey: {key}''',
@@ -167,7 +192,7 @@ def _test_provider(config: UserConfig, provider: str) -> tuple[bool, str]:
         f"{config.base_url}/v1/{provider}/chat/completions",
         data=payload,
         headers={
-            "Authorization": f"Bearer {config.api_key}",
+            "Authorization": f"Bearer {effective_api_key(config)}",
             "Content-Type": "application/json",
         },
         method="POST",
@@ -222,13 +247,14 @@ def _copy_to_clipboard(value: str) -> bool:
 def client_environment(config: UserConfig, provider: str) -> dict[str, str]:
     """Return the current environment with Kessel client settings injected."""
 
+    key = effective_api_key(config) or ""
     environment = os.environ.copy()
     environment.update(
         {
             "OPENAI_BASE_URL": f"{config.base_url}/v1/{provider}",
-            "OPENAI_API_KEY": config.api_key or "",
+            "OPENAI_API_KEY": key,
             "ANTHROPIC_BASE_URL": config.base_url,
-            "ANTHROPIC_API_KEY": config.api_key or "",
+            "ANTHROPIC_API_KEY": key,
         }
     )
     return environment
@@ -241,6 +267,14 @@ def _managed_process_options(*, hidden: bool) -> dict[str, object]:
             flags |= subprocess.CREATE_NO_WINDOW
         return {"creationflags": flags}
     return {"start_new_session": True}
+
+
+def _tail_log(path: Path, lines: int = 20) -> str:
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return "\n".join(content.splitlines()[-lines:])
 
 
 class _OwnedServer:
@@ -261,11 +295,14 @@ class _OwnedServer:
         self.manager.clear_stop_request()
         self.heartbeat_task = asyncio.create_task(self._heartbeat())
         try:
+            owner_environment = os.environ.copy()
+            owner_environment["KESSEL_OWNER_PID"] = str(os.getpid())
             self.process = await asyncio.create_subprocess_exec(
                 *self.manager.command,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                env=owner_environment,
                 **_managed_process_options(hidden=True),
             )
             self.guard = ProcessGroupGuard.attach(self.process)
@@ -284,33 +321,36 @@ class _OwnedServer:
                 if self.process.returncode is not None:
                     raise ServiceError(
                         f"temporary server exited with code {self.process.returncode}"
+                        f"{self._log_tail_suffix()}"
                     )
                 await asyncio.sleep(0.2)
-            raise ServiceError("the temporary server did not become ready within 20 seconds")
+            raise ServiceError(
+                "the temporary server did not become ready within 20 seconds"
+                f"{self._log_tail_suffix()}"
+            )
         except BaseException:
             await self.stop()
             raise
+
+    def _log_tail_suffix(self) -> str:
+        tail = _tail_log(self.manager.log_directory / "kessel.log")
+        return f"\n{tail}" if tail else ""
 
     async def _heartbeat(self) -> None:
         session = self.session
         while True:
             await asyncio.sleep(1)
-            session = await asyncio.to_thread(self.store.heartbeat, session)
+            try:
+                session = await asyncio.to_thread(self.store.heartbeat, session)
+            except RuntimeError as exc:
+                print(f"Kessel run session heartbeat failed: {exc}", file=sys.stderr)
+                await asyncio.to_thread(self.manager.request_stop)
+                return
             self.session = session
 
-    async def wait(self) -> None:
+    async def wait(self, shutdown: asyncio.Event) -> None:
         if self.process is None:
             return
-        shutdown = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        installed_signals: list[signal.Signals] = []
-        if os.name != "nt":
-            for signum in (signal.SIGHUP, signal.SIGTERM):
-                try:
-                    loop.add_signal_handler(signum, shutdown.set)
-                    installed_signals.append(signum)
-                except NotImplementedError:
-                    pass
         server_wait = asyncio.create_task(self.process.wait())
         shutdown_wait = asyncio.create_task(shutdown.wait())
         try:
@@ -328,8 +368,6 @@ class _OwnedServer:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(server_wait, shutdown_wait, return_exceptions=True)
-            for signum in installed_signals:
-                loop.remove_signal_handler(signum)
 
     async def stop(self) -> None:
         heartbeat = self.heartbeat_task
@@ -394,17 +432,56 @@ async def _run_application(
     provider: str,
     command: Sequence[str],
     expected_session: RunSession | None,
+    shutdown: asyncio.Event,
 ) -> int:
+    resolved_command = list(command)
+    resolved_executable = shutil.which(resolved_command[0])
+    if resolved_executable:
+        resolved_command[0] = resolved_executable
     try:
+        # No new process group or session: the application stays in
+        # Kessel's own group so the terminal's Ctrl+C, SIGHUP, and /dev/tty
+        # reach it directly, the same as any other foreground command.
         process = await asyncio.create_subprocess_exec(
-            *command,
+            *resolved_command,
             env=client_environment(config, provider),
-            **_managed_process_options(hidden=False),
         )
     except FileNotFoundError as exc:
         raise RuntimeError(f"Application command not found: {command[0]}") from exc
 
-    guard = ProcessGroupGuard.attach(process)
+    # The Windows job object is safe to use here because it targets exactly
+    # this process and its descendants. On POSIX the application was not
+    # given its own session, so killpg (what ProcessGroupGuard uses) would
+    # hit Kessel's own group; terminate the application's PID directly
+    # instead.
+    guard = ProcessGroupGuard.attach(process) if os.name == "nt" else None
+
+    loop = asyncio.get_running_loop()
+    sigint_installed = False
+    previous_sigint_handler = None
+    if os.name != "nt":
+        try:
+            loop.add_signal_handler(signal.SIGINT, lambda: None)
+            sigint_installed = True
+        except NotImplementedError:
+            pass
+    else:
+        previous_sigint_handler = signal.signal(
+            signal.SIGINT, lambda signum, frame: None
+        )
+
+    async def terminate_application() -> None:
+        if process.returncode is not None:
+            return
+        if guard is not None:
+            guard.terminate()
+        else:
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
 
     async def runtime_stopped() -> None:
         manager = ServiceManager(config)
@@ -420,71 +497,101 @@ async def _run_application(
 
     process_wait = asyncio.create_task(process.wait())
     runtime_wait = asyncio.create_task(runtime_stopped())
+    shutdown_wait = asyncio.create_task(shutdown.wait())
     try:
         done, _ = await asyncio.wait(
-            {process_wait, runtime_wait}, return_when=asyncio.FIRST_COMPLETED
+            {process_wait, runtime_wait, shutdown_wait},
+            return_when=asyncio.FIRST_COMPLETED,
         )
-        if runtime_wait in done and process.returncode is None:
+        if (
+            runtime_wait in done or shutdown_wait in done
+        ) and process.returncode is None:
             print("Kessel stopped; ending the managed application.", file=sys.stderr)
-            guard.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+            await terminate_application()
             return 1
         return process_wait.result()
     finally:
-        for task in (process_wait, runtime_wait):
+        for task in (process_wait, runtime_wait, shutdown_wait):
             if not task.done():
                 task.cancel()
-        await asyncio.gather(process_wait, runtime_wait, return_exceptions=True)
-        if process.returncode is None:
-            guard.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-        await guard.close()
+        await asyncio.gather(
+            process_wait, runtime_wait, shutdown_wait, return_exceptions=True
+        )
+        await terminate_application()
+        if guard is not None:
+            await guard.close()
+        if os.name != "nt":
+            if sigint_installed:
+                loop.remove_signal_handler(signal.SIGINT)
+        else:
+            signal.signal(signal.SIGINT, previous_sigint_handler)
 
 
 async def _run(config: UserConfig, provider: str, command: Sequence[str]) -> int:
-    kind, owned, session = await _acquire_runtime(config, provider)
-    if kind == "durable":
-        print(f"Durable Kessel detected at {config.base_url}; reusing it.", flush=True)
-    elif kind == "foreground":
-        print(
-            f"Foreground Kessel run session detected at {config.base_url}; attaching.",
-            flush=True,
-        )
-    elif kind == "existing":
-        print(
-            f"Existing Kessel server detected at {config.base_url}; reusing it.",
-            flush=True,
-        )
-    else:
-        print(
-            f"Temporary Kessel started at {config.base_url}; client provider: {provider}.",
-            flush=True,
-        )
+    # Installed for the entire lifetime of this command, including while an
+    # application runs, so a closed terminal (SIGHUP) or SIGTERM triggers the
+    # same graceful cleanup as Ctrl+C instead of leaving Kessel or the
+    # application orphaned.
+    loop = asyncio.get_running_loop()
+    shutdown = asyncio.Event()
+    installed_signals: list[signal.Signals] = []
+    if os.name != "nt":
+        for signum in (signal.SIGHUP, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(signum, shutdown.set)
+                installed_signals.append(signum)
+            except NotImplementedError:
+                pass
 
     try:
-        if command:
-            return await _run_application(config, provider, command, session)
-        if owned is None:
-            print("No application command was supplied; Kessel remains owned elsewhere.")
+        kind, owned, session = await _acquire_runtime(config, provider)
+        if kind == "durable":
+            print(
+                f"Durable Kessel detected at {config.base_url}; reusing it.",
+                flush=True,
+            )
+        elif kind == "foreground":
+            print(
+                f"Foreground Kessel run session detected at {config.base_url}; "
+                "attaching.",
+                flush=True,
+            )
+        elif kind == "existing":
+            print(
+                f"Existing Kessel server detected at {config.base_url}; reusing it.",
+                flush=True,
+            )
+        else:
+            print(
+                f"Temporary Kessel started at {config.base_url}; "
+                f"client provider: {provider}.",
+                flush=True,
+            )
+
+        try:
+            if command:
+                return await _run_application(
+                    config, provider, command, session, shutdown
+                )
+            if owned is None:
+                print(
+                    "No application command was supplied; Kessel remains owned "
+                    "elsewhere."
+                )
+                return 0
+            print("Keep this terminal open. Press Ctrl+C to stop Kessel.")
+            print(
+                "Run an application from another terminal with: "
+                f"kessel run --provider {provider} -- <command>"
+            )
+            await owned.wait(shutdown)
             return 0
-        print("Keep this terminal open. Press Ctrl+C to stop Kessel.")
-        print(
-            "Run an application from another terminal with: "
-            f"kessel run --provider {provider} -- <command>"
-        )
-        await owned.wait()
-        return 0
+        finally:
+            if owned is not None:
+                await owned.stop()
     finally:
-        if owned is not None:
-            await owned.stop()
+        for signum in installed_signals:
+            loop.remove_signal_handler(signum)
 
 
 async def _setup_provider_tests(
@@ -522,7 +629,10 @@ async def _setup_provider_tests(
     return tests_failed
 
 
-def command_setup() -> int:
+def command_setup(port: int | None = None) -> int:
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("port must be between 1 and 65535")
+
     print("Checking providers...")
     checks = check_providers()
     _print_doctor(checks)
@@ -553,7 +663,7 @@ def command_setup() -> int:
     configured_commands = UserConfig(
         api_key=config.api_key,
         host=config.host,
-        port=config.port,
+        port=port if port is not None else config.port,
         codex_command=resolved_commands.get("codex") or config.codex_command,
         claude_command=resolved_commands.get("claude") or config.claude_command,
     )
@@ -561,6 +671,17 @@ def command_setup() -> int:
         configured_commands.save()
         config = configured_commands
     print("[ok] Generated a local API key" if created else "[ok] API key already exists")
+
+    try:
+        from kessel_gateway.output_control import estimate_tokens
+
+        estimate_tokens("warmup")
+        print("[ok] Token counter ready")
+    except Exception:
+        print(
+            "[warn] Token counter data could not be downloaded; requests with "
+            "max_tokens need it once online"
+        )
 
     try:
         tests_failed = asyncio.run(_setup_provider_tests(config, working))
@@ -614,23 +735,82 @@ def command_start() -> int:
     return 0
 
 
+def _server_log_config(
+    manager: ServiceManager, *, console: bool
+) -> dict[str, object]:
+    """Return a uvicorn log config that also writes a rotating file.
+
+    uvicorn applies its log config with ``dictConfig``, which replaces any
+    handler attached beforehand, so the file handler must be part of the
+    config itself. Never route prompts, responses, keys, or account info
+    here; the request logs only carry method/path/status.
+    """
+
+    log_dir = manager.log_directory
+    log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    log_path = log_dir / "kessel.log"
+    log_path.touch(exist_ok=True)
+    if os.name != "nt":
+        log_dir.chmod(0o700)
+        log_path.chmod(0o600)
+
+    from uvicorn.config import LOGGING_CONFIG
+
+    config = copy.deepcopy(LOGGING_CONFIG)
+    config["formatters"]["file"] = {
+        "format": "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    }
+    config["handlers"]["file"] = {
+        "class": "logging.handlers.RotatingFileHandler",
+        "formatter": "file",
+        "filename": str(log_path),
+        "maxBytes": 1_048_576,
+        "backupCount": 3,
+        "encoding": "utf-8",
+    }
+    # Durable services have no terminal; console output there only grows the
+    # service manager's unrotated stdout/stderr files.
+    for name, handlers in (
+        ("uvicorn", ["default"]),
+        ("uvicorn.access", ["access"]),
+    ):
+        logger = config["loggers"][name]
+        logger["handlers"] = (handlers if console else []) + ["file"]
+    return config
+
+
 def command_serve() -> int:
     import uvicorn
 
     config = UserConfig.load()
-    if not (os.getenv("KESSEL_API_KEY") or config.api_key):
+    if not effective_api_key(config):
         raise RuntimeError("Kessel is not set up. Run: kessel setup")
     manager = ServiceManager(config)
     manager.clear_stop_request()
+    console = sys.stderr is not None and sys.stderr.isatty()
     uvicorn_config = uvicorn.Config(
-        "kessel_gateway.main:app", host=config.host, port=config.port, workers=1
+        "kessel_gateway.main:app",
+        host=config.host,
+        port=config.port,
+        workers=1,
+        log_config=_server_log_config(manager, console=console),
     )
     server = uvicorn.Server(uvicorn_config)
     watcher_done = threading.Event()
 
+    owner_pid_raw = os.getenv("KESSEL_OWNER_PID")
+    owner_pid = (
+        int(owner_pid_raw)
+        if owner_pid_raw is not None and owner_pid_raw.isdigit()
+        else None
+    )
+
     def watch_for_stop() -> None:
-        while not watcher_done.wait(0.2):
+        while not watcher_done.wait(0.5):
             if manager.stop_request_path.exists():
+                server.should_exit = True
+                return
+            if owner_pid is not None and not _process_is_running(owner_pid):
                 server.should_exit = True
                 return
 
@@ -649,22 +829,49 @@ def command_serve() -> int:
     return 0
 
 
+def command_logs(lines: int) -> int:
+    config = UserConfig.load()
+    manager = ServiceManager(config)
+    log_path = manager.log_directory / "kessel.log"
+    if not log_path.exists():
+        print("No log file yet. Kessel writes one once it has run as a server.", file=sys.stderr)
+        return 1
+    print(_tail_log(log_path, lines))
+    return 0
+
+
+def command_uninstall_service() -> int:
+    config = UserConfig.load()
+    manager = ServiceManager(config)
+    manager.uninstall()
+    print("Kessel's durable service registration is removed.")
+    print(f"Configuration and API key remain at {config.path}.")
+    print(f"Logs remain at {manager.log_directory}.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kessel", description="Local API for Codex and Claude Code subscriptions"
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("setup", help="check providers and configure Kessel")
+    setup_parser = subparsers.add_parser(
+        "setup", help="check providers and configure Kessel"
+    )
+    setup_parser.add_argument(
+        "--port", type=int, default=None, help="set the port Kessel listens on"
+    )
     subparsers.add_parser("accounts", help="show provider account information")
     subparsers.add_parser("doctor", help="check provider installation and login")
     env_parser = subparsers.add_parser("env", help="print client environment variables")
-    env_parser.add_argument("--provider", choices=("codex", "claude"), default="claude")
+    env_parser.add_argument("--provider", choices=("codex", "claude"), default=None)
     env_parser.add_argument(
         "--shell", choices=("fish", "powershell"), default="posix"
     )
     connect = subparsers.add_parser("connect", help="print setup for a client")
     connect.add_argument("tool")
+    connect.add_argument("--provider", choices=("codex", "claude"), default=None)
     key_parser = subparsers.add_parser("key", help="manage the local API key")
     key_parser.add_argument(
         "--rotate", action="store_true", help="replace the saved API key"
@@ -687,14 +894,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="application command, normally placed after --",
     )
     subparsers.add_parser("serve", help="run the foreground API server")
+    logs_parser = subparsers.add_parser("logs", help="print the tail of the server log")
+    logs_parser.add_argument(
+        "-n", type=int, default=20, dest="lines", help="number of lines to print"
+    )
+    subparsers.add_parser(
+        "uninstall-service",
+        help="remove the durable Kessel service registration",
+    )
     return parser
+
+
+def _degraded_detail(payload: dict) -> str:
+    providers = payload.get("providers")
+    unavailable: list[str] = []
+    if isinstance(providers, dict):
+        for name, info in providers.items():
+            available = info.get("available") if isinstance(info, dict) else bool(info)
+            if not available:
+                unavailable.append(name)
+    if unavailable:
+        return f"{', '.join(sorted(unavailable))} unavailable"
+    return "no provider available"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "setup":
-            return command_setup()
+            return command_setup(args.port)
         if args.command == "accounts":
             return command_accounts()
         if args.command == "doctor":
@@ -702,10 +930,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_doctor(checks)
             return 0 if any(check.working for check in checks) else 1
         if args.command == "env":
-            print(render_env(_configured(), args.provider, args.shell))
+            config = _configured()
+            provider = args.provider or _default_provider(config)
+            print(render_env(config, provider, args.shell))
             return 0
         if args.command == "connect":
-            print(render_connect(_configured(), args.tool))
+            config = _configured()
+            provider = args.provider or _default_provider(config)
+            print(render_connect(config, provider, args.tool))
             return 0
         if args.command == "key":
             config, _ = load_or_create_config()
@@ -718,11 +950,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 config.save()
                 print("Kessel API key rotated. Existing clients must use the new key.")
             if args.copy:
-                if not _copy_to_clipboard(config.api_key or ""):
+                if not _copy_to_clipboard(effective_api_key(config) or ""):
                     raise RuntimeError("Clipboard unavailable")
                 print("Kessel API key copied to the clipboard.")
             elif not args.rotate:
-                print(config.api_key)
+                print(effective_api_key(config))
             return 0
         if args.command == "start":
             return command_start()
@@ -740,8 +972,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "status":
             config = _configured()
-            if ServiceManager(config).is_running():
-                print(f"Kessel is running at {config.base_url}.")
+            payload = ServiceManager(config).health()
+            if payload is not None and payload.get("service") == "kessel":
+                if payload.get("status") == "degraded":
+                    print(
+                        f"Kessel is running at {config.base_url} "
+                        f"(degraded: {_degraded_detail(payload)})."
+                    )
+                else:
+                    print(f"Kessel is running at {config.base_url}.")
                 return 0
             print(
                 "Kessel isn't running. Use: kessel run --provider codex "
@@ -756,6 +995,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_run(_configured(), args.provider, application))
         if args.command == "serve":
             return command_serve()
+        if args.command == "logs":
+            return command_logs(args.lines)
+        if args.command == "uninstall-service":
+            return command_uninstall_service()
     except KeyboardInterrupt:
         print("Kessel stopped.")
         return 130

@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,8 @@ from kessel_gateway import cli
 from kessel_gateway import __version__
 from kessel_gateway.models import ProviderAccountInfo
 from kessel_gateway.providers.health import ProviderHealth
+from kessel_gateway.run_session import RunSession
+from kessel_gateway.service import ServiceManager
 from kessel_gateway.user_config import UserConfig
 
 
@@ -18,6 +21,15 @@ def configured(tmp_path: Path, monkeypatch) -> UserConfig:
     return config
 
 
+@pytest.fixture(autouse=True)
+def _stub_tokenizer_warmup(monkeypatch):
+    # `kessel setup` pre-warms the tokenizer, which otherwise downloads data
+    # over the network. Stub it so the CLI test suite stays fast and offline.
+    monkeypatch.setattr(
+        "kessel_gateway.output_control.estimate_tokens", lambda text: 1
+    )
+
+
 def test_cli_version(capsys) -> None:
     with pytest.raises(SystemExit) as exit_info:
         cli.main(["--version"])
@@ -27,22 +39,22 @@ def test_cli_version(capsys) -> None:
 
 
 @pytest.mark.parametrize(
-    ("shell", "expected"),
+    ("shell", "expected_template"),
     [
-        ("posix", "export OPENAI_BASE_URL=http://127.0.0.1:8000/v1/claude"),
-        ("fish", "set -gx OPENAI_BASE_URL 'http://127.0.0.1:8000/v1/claude';"),
+        ("posix", "export OPENAI_BASE_URL={base_url}/v1/claude"),
+        ("fish", "set -gx OPENAI_BASE_URL '{base_url}/v1/claude';"),
         (
             "powershell",
-            "$env:OPENAI_BASE_URL = 'http://127.0.0.1:8000/v1/claude'",
+            "$env:OPENAI_BASE_URL = '{base_url}/v1/claude'",
         ),
     ],
 )
 def test_env_output_for_each_shell(
-    configured: UserConfig, shell: str, expected: str
+    configured: UserConfig, shell: str, expected_template: str
 ) -> None:
     output = cli.render_env(configured, "claude", shell)
 
-    assert expected in output
+    assert expected_template.format(base_url=configured.base_url) in output
     assert "kessel_test_real_key" in output
     assert "ANTHROPIC_BASE_URL" in output
 
@@ -50,26 +62,48 @@ def test_env_output_for_each_shell(
 def test_env_provider_selects_openai_route(configured: UserConfig) -> None:
     output = cli.render_env(configured, "codex", "posix")
 
-    assert "OPENAI_BASE_URL=http://127.0.0.1:8000/v1/codex" in output
-    assert "ANTHROPIC_BASE_URL=http://127.0.0.1:8000" in output
+    assert f"OPENAI_BASE_URL={configured.base_url}/v1/codex" in output
+    assert f"ANTHROPIC_BASE_URL={configured.base_url}" in output
 
 
 @pytest.mark.parametrize("target", cli.CONNECT_TARGETS)
 def test_each_connect_target_renders_real_key_and_url(
     configured: UserConfig, target: str
 ) -> None:
-    output = cli.render_connect(configured, target)
+    output = cli.render_connect(configured, "claude", target)
 
     assert "kessel_test_real_key" in output
-    assert "http://127.0.0.1:8000" in output
+    assert configured.base_url in output
     assert "Paste" in output
 
 
 def test_unknown_connect_target_gets_generic_pair(configured: UserConfig) -> None:
-    output = cli.render_connect(configured, "my-tool")
+    output = cli.render_connect(configured, "claude", "my-tool")
 
-    assert "OpenAI-compatible base URL: http://127.0.0.1:8000/v1/claude" in output
+    assert (
+        f"OpenAI-compatible base URL: {configured.base_url}/v1/claude" in output
+    )
     assert "API key: kessel_test_real_key" in output
+
+
+def test_connect_provider_selects_openai_route(configured: UserConfig) -> None:
+    output = cli.render_connect(configured, "codex", "curl")
+
+    assert f"{configured.base_url}/v1/codex" in output
+
+
+def test_connect_codex_notes_anthropic_routes_use_claude(
+    configured: UserConfig,
+) -> None:
+    output = cli.render_connect(configured, "codex", "anthropic-python")
+
+    assert "Anthropic SDK routes always use Claude Code" in output
+
+
+def test_connect_claude_has_no_anthropic_note(configured: UserConfig) -> None:
+    output = cli.render_connect(configured, "claude", "anthropic-python")
+
+    assert "Anthropic SDK routes always use Claude Code" not in output
 
 
 def test_doctor_reports_incompatible_provider(monkeypatch, capsys) -> None:
@@ -346,7 +380,7 @@ def test_client_environment_injects_kessel_values(
     assert environment["KEEP_ME"] == "yes"
     assert environment["OPENAI_BASE_URL"].endswith("/v1/codex")
     assert environment["OPENAI_API_KEY"] == "kessel_test_real_key"
-    assert environment["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8000"
+    assert environment["ANTHROPIC_BASE_URL"] == configured.base_url
     assert environment["ANTHROPIC_API_KEY"] == "kessel_test_real_key"
 
 
@@ -377,6 +411,7 @@ def test_run_passes_application_as_an_argument_array(
         provider: str,
         command: list[str],
         expected_session,
+        shutdown,
     ) -> int:
         received.extend(command)
         return 7
@@ -415,8 +450,8 @@ def test_status_has_actionable_not_running_error(
         def __init__(self, config: UserConfig) -> None:
             pass
 
-        def is_running(self) -> bool:
-            return False
+        def health(self) -> dict | None:
+            return None
 
     monkeypatch.setattr(cli, "ServiceManager", StoppedServiceManager)
 
@@ -425,3 +460,239 @@ def test_status_has_actionable_not_running_error(
         capsys.readouterr().err
         == "Kessel isn't running. Use: kessel run --provider codex or kessel start\n"
     )
+
+
+def test_status_reports_degraded(configured: UserConfig, monkeypatch, capsys) -> None:
+    class DegradedServiceManager:
+        def __init__(self, config: UserConfig) -> None:
+            pass
+
+        def health(self) -> dict:
+            return {
+                "service": "kessel",
+                "status": "degraded",
+                "providers": {
+                    "codex": {"available": False},
+                    "claude": {"available": True},
+                },
+            }
+
+    monkeypatch.setattr(cli, "ServiceManager", DegradedServiceManager)
+
+    assert cli.main(["status"]) == 0
+    output = capsys.readouterr().out
+    assert "is running" in output
+    assert "degraded: codex unavailable" in output
+
+
+def test_status_running_without_degraded_suffix(
+    configured: UserConfig, monkeypatch, capsys
+) -> None:
+    class OkServiceManager:
+        def __init__(self, config: UserConfig) -> None:
+            pass
+
+        def health(self) -> dict:
+            return {"service": "kessel", "status": "ok", "providers": {}}
+
+    monkeypatch.setattr(cli, "ServiceManager", OkServiceManager)
+
+    assert cli.main(["status"]) == 0
+    output = capsys.readouterr().out
+    assert "degraded" not in output
+
+
+def test_render_env_uses_environment_key_override(
+    configured: UserConfig, monkeypatch
+) -> None:
+    monkeypatch.setenv("KESSEL_API_KEY", "kessel_env_override")
+
+    output = cli.render_env(configured, "claude", "posix")
+
+    assert "kessel_env_override" in output
+    assert "kessel_test_real_key" not in output
+
+
+def test_default_provider_prefers_sole_configured_command() -> None:
+    codex_only = UserConfig(api_key="k", codex_command="codex")
+    claude_only = UserConfig(api_key="k", claude_command="claude")
+    neither = UserConfig(api_key="k")
+    both = UserConfig(api_key="k", codex_command="codex", claude_command="claude")
+
+    assert cli._default_provider(codex_only) == "codex"
+    assert cli._default_provider(claude_only) == "claude"
+    assert cli._default_provider(neither) == "claude"
+    assert cli._default_provider(both) == "claude"
+
+
+def test_env_falls_back_to_default_provider(
+    configured: UserConfig, monkeypatch
+) -> None:
+    codex_config = UserConfig(
+        api_key=configured.api_key, port=configured.port, codex_command="codex"
+    )
+    codex_config.save()
+    seen_providers: list[str] = []
+    monkeypatch.setattr(
+        cli,
+        "render_env",
+        lambda cfg, provider, shell: seen_providers.append(provider) or "ok",
+    )
+
+    assert cli.main(["env"]) == 0
+    assert seen_providers == ["codex"]
+
+
+def test_setup_port_flag_saves_port(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("KESSEL_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path / "state"))
+    check = ProviderHealth("claude", "Claude Code", True, True, "1.0.0")
+    monkeypatch.setattr(cli, "check_providers", lambda: [check])
+
+    async def fake_setup_tests(config: UserConfig, working) -> bool:
+        return False
+
+    monkeypatch.setattr(cli, "_setup_provider_tests", fake_setup_tests)
+
+    assert cli.main(["setup", "--port", "9001"]) == 0
+    assert UserConfig.load().port == 9001
+
+
+def test_setup_rejects_invalid_port(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("KESSEL_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path / "state"))
+
+    assert cli.main(["setup", "--port", "70000"]) == 1
+    assert "port must be between 1 and 65535" in capsys.readouterr().err
+    assert not UserConfig().path.exists()
+
+
+def test_setup_reports_token_counter_ready(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("KESSEL_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path / "state"))
+    check = ProviderHealth("claude", "Claude Code", True, True, "1.0.0")
+    monkeypatch.setattr(cli, "check_providers", lambda: [check])
+
+    async def fake_setup_tests(config: UserConfig, working) -> bool:
+        return False
+
+    monkeypatch.setattr(cli, "_setup_provider_tests", fake_setup_tests)
+
+    assert cli.main(["setup"]) == 0
+    assert "[ok] Token counter ready" in capsys.readouterr().out
+
+
+def test_setup_reports_token_counter_warning_when_offline(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("KESSEL_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path / "state"))
+    check = ProviderHealth("claude", "Claude Code", True, True, "1.0.0")
+    monkeypatch.setattr(cli, "check_providers", lambda: [check])
+
+    async def fake_setup_tests(config: UserConfig, working) -> bool:
+        return False
+
+    monkeypatch.setattr(cli, "_setup_provider_tests", fake_setup_tests)
+
+    def boom(text: str) -> int:
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr("kessel_gateway.output_control.estimate_tokens", boom)
+
+    assert cli.main(["setup"]) == 0
+    output = capsys.readouterr().out
+    assert "[warn] Token counter data could not be downloaded" in output
+
+
+def test_logs_prints_tail(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("KESSEL_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path / "state"))
+    log_dir = tmp_path / "state" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "kessel.log").write_text(
+        "\n".join(f"line {i}" for i in range(30)) + "\n", encoding="utf-8"
+    )
+
+    assert cli.main(["logs", "-n", "5"]) == 0
+    output = capsys.readouterr().out.strip().splitlines()
+    assert output == [f"line {i}" for i in range(25, 30)]
+
+
+def test_logs_missing_file_is_an_actionable_error(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("KESSEL_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path / "state"))
+
+    assert cli.main(["logs"]) == 1
+    assert "No log file yet" in capsys.readouterr().err
+
+
+def test_uninstall_service_stops_and_removes_registration(
+    configured: UserConfig, monkeypatch, capsys
+) -> None:
+    calls: list[str] = []
+
+    class FakeManager:
+        def __init__(self, config: UserConfig) -> None:
+            self.log_directory = Path("state") / "logs"
+
+        def uninstall(self) -> None:
+            calls.append("uninstall")
+
+    monkeypatch.setattr(cli, "ServiceManager", FakeManager)
+
+    assert cli.main(["uninstall-service"]) == 0
+    assert calls == ["uninstall"]
+    output = capsys.readouterr().out
+    assert "Configuration and API key remain" in output
+    assert "Logs remain" in output
+
+
+@pytest.mark.asyncio
+async def test_owned_server_heartbeat_failure_triggers_shutdown(
+    monkeypatch, capsys
+) -> None:
+    config = UserConfig(api_key="k")
+    manager = ServiceManager(config)
+    session = RunSession(token="t", owner_pid=1, provider="codex", heartbeat=0.0)
+    owned = cli._OwnedServer(config, manager, session)
+
+    def fail_heartbeat(session: RunSession) -> RunSession:
+        raise RuntimeError("Kessel run session ownership was lost")
+
+    monkeypatch.setattr(owned.store, "heartbeat", fail_heartbeat)
+    stop_calls: list[bool] = []
+    monkeypatch.setattr(manager, "request_stop", lambda: stop_calls.append(True))
+
+    await asyncio.wait_for(owned._heartbeat(), timeout=3)
+
+    assert stop_calls == [True]
+    assert "heartbeat failed" in capsys.readouterr().err
+
+
+def test_server_log_config_survives_uvicorn_dictconfig(tmp_path, monkeypatch) -> None:
+    import logging
+    import logging.config
+
+    from kessel_gateway import cli
+    from kessel_gateway.service import ServiceManager
+    from kessel_gateway.user_config import UserConfig
+
+    monkeypatch.setenv("KESSEL_STATE_DIR", str(tmp_path / "state"))
+    config = cli._server_log_config(ServiceManager(UserConfig()), console=False)
+    logging.config.dictConfig(config)
+    try:
+        logging.getLogger("uvicorn.error").info("server started")
+        for handler in logging.getLogger("uvicorn").handlers:
+            handler.flush()
+        log_path = tmp_path / "state" / "logs" / "kessel.log"
+        assert "server started" in log_path.read_text(encoding="utf-8")
+    finally:
+        for name in ("uvicorn", "uvicorn.access"):
+            for handler in logging.getLogger(name).handlers[:]:
+                handler.close()
+                logging.getLogger(name).removeHandler(handler)

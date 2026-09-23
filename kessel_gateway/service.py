@@ -24,6 +24,43 @@ class ServiceError(RuntimeError):
     pass
 
 
+# Proxy and CA-bundle variables, checked in both upper and lower case, that
+# durable services need to reach the network the same way the interactive
+# shell that ran `kessel start` could. Never add credential or Kessel
+# variables here.
+_CAPTURED_PROXY_VARIABLE_NAMES = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+)
+
+
+def _captured_environment() -> dict[str, str]:
+    """Environment to embed in the durable service's launch configuration.
+
+    launchd and systemd start services with a minimal environment, so an
+    npm-installed ``codex``/``claude`` (a ``#!/usr/bin/env node`` script)
+    cannot be found without capturing the current ``PATH``. Proxy and CA
+    variables are captured the same way. This never captures API keys or
+    other Kessel variables.
+    """
+
+    captured: dict[str, str] = {}
+    path_value = os.environ.get("PATH")
+    if path_value:
+        captured["PATH"] = path_value
+    for name in _CAPTURED_PROXY_VARIABLE_NAMES:
+        for candidate in (name, name.lower()):
+            value = os.environ.get(candidate)
+            if value is not None:
+                captured[candidate] = value
+    return captured
+
+
 class ServiceManager:
     """Small platform adapter for an unprivileged, login-scoped service."""
 
@@ -42,22 +79,38 @@ class ServiceManager:
     def stop_request_path(self) -> Path:
         return state_directory() / "stop.request"
 
-    def is_running(self, timeout: float = 1.0) -> bool:
+    def health(self, timeout: float = 1.0) -> dict | None:
+        """Return the parsed ``/health`` payload, or ``None`` when unreachable.
+
+        ``/health`` answers 200 whenever Kessel is alive and 503 when no
+        provider is available; both carry a JSON body, so a non-200 status
+        is not treated as a connection failure here.
+        """
+
         request = urllib.request.Request(self.config.base_url + "/health")
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                if response.status != 200:
-                    return False
-                payload = json.loads(response.read().decode("utf-8"))
-                providers = payload.get("providers", {})
-                return isinstance(providers, dict) and payload.get(
-                    "status"
-                ) == "ok" and {
-                    "claude",
-                    "codex",
-                }.issubset(providers)
-        except (OSError, ValueError, urllib.error.URLError):
-            return False
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8")
+        except (OSError, urllib.error.URLError):
+            return None
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def is_running(self, timeout: float = 1.0) -> bool:
+        """Return whether a Kessel server is alive, whatever its status.
+
+        This is a liveness check, not a readiness check: a server reporting
+        ``status: degraded`` (no provider currently available) still counts
+        as running so ``kessel status`` and ``kessel stop`` work on it.
+        """
+
+        payload = self.health(timeout=timeout)
+        return payload is not None and payload.get("service") == "kessel"
 
     def is_registered(self) -> bool:
         """Return whether the per-user durable service has been installed."""
@@ -120,6 +173,61 @@ class ServiceManager:
                 ["systemctl", "--user", "stop", "kessel.service"],
                 allow_failure=True,
             )
+
+    def uninstall(self) -> None:
+        """Stop Kessel and remove the durable service registration.
+
+        Idempotent: safe to call whether or not the service is currently
+        installed or running. Configuration, the API key, and logs are left
+        in place.
+        """
+
+        if self.is_running():
+            self.stop()
+            self.wait_until_stopped()
+        if sys.platform == "win32":
+            self._uninstall_windows()
+        elif sys.platform == "darwin":
+            self._uninstall_macos()
+        else:
+            self._uninstall_linux()
+
+    def _uninstall_windows(self) -> None:
+        if winreg is None:
+            return
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0,
+                winreg.KEY_ALL_ACCESS,
+            ) as key:
+                winreg.DeleteValue(key, "Kessel")
+        except OSError:
+            pass
+
+    def _uninstall_macos(self) -> None:
+        plist_path = Path.home() / "Library" / "LaunchAgents" / "dev.kessel.api.plist"
+        self._run(
+            ["launchctl", "bootout", f"gui/{os.getuid()}", str(plist_path)],
+            allow_failure=True,
+        )
+        try:
+            plist_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def _uninstall_linux(self) -> None:
+        unit_path = Path.home() / ".config" / "systemd" / "user" / "kessel.service"
+        self._run(
+            ["systemctl", "--user", "disable", "--now", "kessel.service"],
+            allow_failure=True,
+        )
+        try:
+            unit_path.unlink()
+        except FileNotFoundError:
+            pass
+        self._run(["systemctl", "--user", "daemon-reload"], allow_failure=True)
 
     def request_stop(self) -> None:
         path = self.stop_request_path
@@ -205,12 +313,17 @@ class ServiceManager:
         unit_directory.mkdir(parents=True, exist_ok=True)
         unit_path = unit_directory / "kessel.service"
         command = " ".join(self._systemd_quote(part) for part in self.command)
+        environment_lines = "".join(
+            f"Environment={self._systemd_quote(f'{name}={value}')}\n"
+            for name, value in _captured_environment().items()
+        )
         unit = (
             "[Unit]\n"
             "Description=Kessel local API\n"
             "After=network.target\n\n"
             "[Service]\n"
             f"ExecStart={command}\n"
+            f"{environment_lines}"
             "Restart=on-failure\n"
             "RestartSec=2\n\n"
             "[Install]\n"
@@ -233,8 +346,9 @@ class ServiceManager:
             "ProgramArguments": self.command,
             "RunAtLoad": True,
             "KeepAlive": {"SuccessfulExit": False},
-            "StandardOutPath": os.devnull,
-            "StandardErrorPath": os.devnull,
+            "StandardOutPath": str(self.log_directory / "kessel-service.out.log"),
+            "StandardErrorPath": str(self.log_directory / "kessel-service.err.log"),
+            "EnvironmentVariables": _captured_environment(),
         }
         serialized = plistlib.dumps(payload)
         changed = not plist_path.exists() or plist_path.read_bytes() != serialized

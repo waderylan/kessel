@@ -92,7 +92,7 @@ async def measure(runs: int) -> dict[str, object]:
         "messages": [{"role": "user", "content": "benchmark"}],
     }
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://127.0.0.1:8000"
+        transport=transport, base_url="http://127.0.0.1:4880"
     ) as client:
         await client.get("/health")
         await client.post("/v1/codex/chat/completions", json=payload)

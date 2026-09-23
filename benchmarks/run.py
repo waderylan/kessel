@@ -189,7 +189,7 @@ def update_readme_table(rows: list[dict], readme: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--base-url", default="http://127.0.0.1:4880")
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).parent)
     parser.add_argument(

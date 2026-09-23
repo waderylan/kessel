@@ -76,7 +76,7 @@ This command:
 3. Runs the application with its normal terminal input and output.
 4. Stops the temporary Kessel server when the application exits.
 
-Closing the terminal or pressing Ctrl+C also ends the managed application and temporary Kessel server. Kessel never changes your global or parent-terminal environment.
+The application runs directly in Kessel's own terminal session, so Ctrl+C, `/dev/tty` access, and other terminal signals reach it exactly as if you had launched it yourself; Kessel steps out of the way of SIGINT while the application runs. Closing the terminal (or sending SIGHUP or SIGTERM to Kessel) stops the managed application and the temporary Kessel server together, on Windows, macOS, and Linux alike. Kessel never changes your global or parent-terminal environment.
 
 The application reads the standard variables expected by its SDK:
 
@@ -122,7 +122,9 @@ Stop the durable service explicitly:
 kessel stop
 ```
 
-`kessel start` registers Kessel as a login-scoped service for the current operating-system user. It can start again at the next login after `kessel stop`; the stop command ends the current service process without deleting its registration, configuration, or API key.
+`kessel start` registers Kessel as a login-scoped service for the current operating-system user. It can start again at the next login after `kessel stop`; the stop command ends the current service process without deleting its registration, configuration, or API key. Run `kessel uninstall-service` to remove the registration itself (the Windows startup entry, the macOS launch agent, or the systemd user unit); it leaves your configuration, API key, and logs in place and is safe to run again.
+
+At install time, `kessel start` captures your current `PATH` (so an npm-installed `codex`/`claude` can still be found under launchd's or systemd's minimal environment) along with any of `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `NODE_EXTRA_CA_CERTS` you have set, and bakes them into the service definition. If you install or move a Node/provider CLI afterward, run `kessel stop` followed by `kessel start` again so the durable service picks up the new `PATH`.
 
 ### Alternative: Start Kessel before the application exists
 
@@ -148,9 +150,9 @@ The `--provider` value selects the OpenAI-compatible route supplied to the appli
 
 | Variable | Value |
 | --- | --- |
-| `OPENAI_BASE_URL` | `http://127.0.0.1:8000/v1/codex` or `/v1/claude` |
+| `OPENAI_BASE_URL` | `http://127.0.0.1:4880/v1/codex` or `/v1/claude` |
 | `OPENAI_API_KEY` | The local Kessel key |
-| `ANTHROPIC_BASE_URL` | `http://127.0.0.1:8000` |
+| `ANTHROPIC_BASE_URL` | `http://127.0.0.1:4880` |
 | `ANTHROPIC_API_KEY` | The same local Kessel key |
 
 The OpenAI route is selected by `--provider`. The Anthropic Messages route always uses Claude Code because Codex does not implement that API.
@@ -190,6 +192,8 @@ kessel connect anthropic-python
 
 Supported connection targets are `cursor`, `continue`, `aider`, `curl`, `openai-python`, `openai-node`, `anthropic-python`, and `anthropic-node`.
 
+Both commands accept `--provider {codex,claude}` to choose which provider the OpenAI-compatible route points at. Without `--provider`, Kessel uses the sole configured provider when only one of Codex or Claude Code is set up, and `claude` otherwise. The Anthropic routes always use Claude Code regardless of `--provider`; when `--provider codex` is combined with an `anthropic-python` or `anthropic-node` target, `kessel connect` prints a note that Anthropic SDK routes always use Claude Code.
+
 `kessel connect` prints the real local key, so treat its output as a credential. `kessel env` is also available for advanced shell workflows, but it is unnecessary when an application is launched through `kessel run`.
 
 ## Commands
@@ -198,23 +202,27 @@ Supported connection targets are `cursor`, `continue`, `aider`, `curl`, `openai-
 | --- | --- |
 | `kessel --version` | Show the installed Kessel version |
 | `kessel setup` | Configure Kessel and test available providers without leaving it running |
+| `kessel setup --port PORT` | Configure Kessel and save `PORT` (1-65535) as the port it listens on |
 | `kessel accounts` | Show account information for installed provider CLIs |
 | `kessel run --provider PROVIDER -- COMMAND` | Run an application with a temporary, foreground, or existing durable Kessel |
 | `kessel run --provider PROVIDER` | Own a foreground Kessel session in the current terminal |
 | `kessel start` | Install and start durable Kessel for the current user |
 | `kessel stop` | Stop the current Kessel process |
-| `kessel status` | Show whether Kessel is running |
+| `kessel status` | Show whether Kessel is running, including a degraded reason |
 | `kessel doctor` | Check provider installation, compatibility, and login state |
-| `kessel connect TARGET` | Print a client's local URL and Kessel key |
+| `kessel connect TARGET [--provider PROVIDER]` | Print a client's local URL and Kessel key |
+| `kessel env [--provider PROVIDER]` | Print client environment variables for the current shell |
 | `kessel key --copy` | Copy the Kessel key without printing it |
 | `kessel key --rotate` | Replace the saved Kessel key |
+| `kessel logs [-n N]` | Print the last `N` lines (default 20) of the server log |
+| `kessel uninstall-service` | Remove the durable service registration; keeps config, key, and logs |
 
 `kessel accounts` works without a running Kessel server. It reports both
 providers as authenticated, signed out, missing, or unavailable and includes
 email, organization, plan, and authentication method when supplied by the CLI.
 Account information is printed only to the invoking terminal.
 
-The local web client is available at `http://127.0.0.1:8000` while Kessel is running. It shows the selected provider's signed-in account after the local Kessel key is entered. Interactive API documentation is at `http://127.0.0.1:8000/docs`.
+The local web client is available at `http://127.0.0.1:4880` while Kessel is running. It shows the selected provider's signed-in account after the local Kessel key is entered. Interactive API documentation is at `http://127.0.0.1:4880/docs`.
 
 ## API routes
 
@@ -226,6 +234,13 @@ The local web client is available at `http://127.0.0.1:8000` while Kessel is run
 | `GET` | `/v1/providers/accounts` | Signed-in provider account information |
 | `GET` | `/v1/{provider}/models` | Provider model discovery |
 | `GET` | `/health` | Local service health |
+
+`/health` returns HTTP 200 whenever Kessel is alive, with a JSON body of the
+form `{"service": "kessel", "version": "...", "status": "ok" | "degraded",
+"providers": {...}}`. `status` is `degraded` when no configured provider is
+currently available; Kessel still answers `/v1` routes for any provider that
+is available. `/health` does not require the Kessel API key and does not
+expose account information.
 
 OpenAI-compatible clients send `Authorization: Bearer <kessel key>`. Anthropic clients send `X-API-Key: <kessel key>`. Kessel accepts either header on authenticated API routes.
 
@@ -260,9 +275,11 @@ Provider status is `authenticated`, `not_authenticated`, `not_installed`, or
 
 - Each request is independent. The default backend starts a fresh provider process for every request.
 - OpenAI and Anthropic streaming formats are supported.
-- `max_tokens`, stop sequences, JSON objects, and JSON Schema output are enforced at Kessel's response boundary.
-- One required function tool is supported per request. Parallel or optional tool selection is not supported.
-- Codex supports an optional warm backend, but every warm request still receives a new ephemeral thread.
+- `max_tokens`, stop sequences, JSON objects, and JSON Schema output are enforced at Kessel's response boundary. Enforcing `max_tokens` or a stop sequence requires token-counting data that Kessel downloads once the first time it is needed; `kessel setup` pre-warms it so the first request does not pay that cost.
+- Up to 16 OpenAI-style function tools are supported per request, with `tool_choice` of `auto`, `required`, `none`, or a named tool object (`{"type": "function", "function": {"name": "..."}}`). At most one tool call is returned per response, and `parallel_tool_calls` is not supported.
+- The Anthropic Messages route accepts any `claude-*` model ID and rejects requests whose content includes image or document blocks.
+- Codex supports an optional warm backend, but every warm request still receives a new ephemeral thread; the warm Codex process uses the account already signed in to the Codex CLI in place, without copying credentials, and it shuts itself down after 10 minutes of idle time.
+- Provider processes inherit `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `NODE_EXTRA_CA_CERTS` from Kessel's environment when those are set, so provider CLIs behind a corporate proxy or custom CA bundle keep working.
 - Kessel must run as one Uvicorn worker because provider limits and warm Codex state are process-local.
 
 Use `/docs` for complete request schemas and validation rules.
@@ -272,6 +289,8 @@ Use `/docs` for complete request schemas and validation rules.
 Configuration is stored in `%LOCALAPPDATA%\Kessel\config.json` on Windows and `$XDG_CONFIG_HOME/kessel/config.json`, normally `~/.config/kessel/config.json`, on macOS and Linux.
 
 Kessel binds to `127.0.0.1`, authenticates every `/v1` route with its local key, and does not store prompts, responses, or provider account information. Provider credentials remain in the provider CLIs' existing authentication stores. Provider processes receive an allowlisted environment and run with tools, user rules, skills, MCP servers, and conversation persistence disabled by default.
+
+When Kessel runs as a server (`kessel serve`, `kessel start`, or a temporary server owned by `kessel run`), it writes a rotating log file next to its configuration state (in the `logs` subdirectory), capped at 1 MB across 3 files. The log only ever records request method, path, and status; it never records prompts, responses, keys, or account information. Use `kessel logs` to print its tail.
 
 Kessel protects a localhost service from accidental or unauthorized requests. It is not a security boundary against another process running as the same operating-system user because that process can ordinarily read the same local files.
 
@@ -324,6 +343,8 @@ python -m pytest -q
 ```
 
 Use `kessel setup` for an end-to-end provider test. `kessel serve` is an internal foreground server command intended only for debugging; normal local work should use `kessel run` or `kessel start`.
+
+Releases publish to PyPI from CI: publishing a GitHub release triggers a workflow that builds the wheel and source distribution from the release tag and uploads them with trusted publishing. Local `python -m build`/`twine` runs are for verification, not for publishing.
 
 ## Provider terms
 
