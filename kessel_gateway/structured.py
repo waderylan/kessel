@@ -30,12 +30,29 @@ def _strip_code_fence(text: str) -> str:
     return text if match is None else match.group("body")
 
 
-def _tool_envelope(tools: list[FunctionTool], required: bool) -> dict[str, Any]:
+def _call_schema(tool: FunctionTool) -> dict[str, Any]:
+    """Schema for one call to ``tool``: its name paired with its own arguments."""
+
+    return {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "enum": [tool.function.name]},
+            "arguments": tool.function.parameters,
+        },
+        "required": ["name", "arguments"],
+        "additionalProperties": False,
+    }
+
+
+def _tool_envelope(
+    tools: list[FunctionTool], required: bool, max_calls: int
+) -> dict[str, Any]:
     """Object-rooted envelope so Codex's strict-schema --output-schema accepts it.
 
-    ``kind`` distinguishes a function call from a plain message; ``name`` and
-    ``arguments`` carry the call when ``kind`` is ``function_call``; ``content``
-    carries the reply when ``kind`` is ``message``.
+    ``kind`` distinguishes a function call from a plain message. ``calls`` lists
+    the function calls (at most ``max_calls``) when ``kind`` is ``function_call``
+    and is empty otherwise. ``content`` carries the reply when ``kind`` is
+    ``message``.
     """
 
     kinds = ["function_call"] if required else ["function_call", "message"]
@@ -43,17 +60,14 @@ def _tool_envelope(tools: list[FunctionTool], required: bool) -> dict[str, Any]:
         "type": "object",
         "properties": {
             "kind": {"type": "string", "enum": kinds},
-            "name": {
-                "type": ["string", "null"],
-                "enum": [tool.function.name for tool in tools] + [None],
-            },
-            "arguments": {
-                "anyOf": [tool.function.parameters for tool in tools]
-                + [{"type": "null"}]
+            "calls": {
+                "type": "array",
+                "items": {"anyOf": [_call_schema(tool) for tool in tools]},
+                "maxItems": max_calls,
             },
             "content": {"type": ["string", "null"]},
         },
-        "required": ["kind", "name", "arguments", "content"],
+        "required": ["kind", "calls", "content"],
         "additionalProperties": False,
     }
 
@@ -63,7 +77,9 @@ def output_schema(request: ChatCompletionRequest) -> dict[str, Any] | None:
 
     active_tools = request.active_tools()
     if active_tools:
-        return _tool_envelope(active_tools, request.requires_tool_call())
+        return _tool_envelope(
+            active_tools, request.requires_tool_call(), request.max_tool_calls()
+        )
 
     response_format = request.response_format
     if response_format is None or response_format.type == "text":
@@ -191,8 +207,32 @@ def parse_structured_result(
     if kind != "function_call":
         raise ProcessError("provider returned an unknown tool-call envelope kind")
 
-    name = payload.get("name")
-    arguments = payload.get("arguments")
+    result.text = None
+    result.tool_calls = _parse_tool_calls(payload.get("calls"), active_tools, request)
+    return result
+
+
+def _parse_tool_calls(
+    raw_calls: object,
+    active_tools: list[FunctionTool],
+    request: ChatCompletionRequest,
+) -> list[ToolCall]:
+    """Turn the envelope's ``calls`` list into validated public tool calls."""
+
+    if not isinstance(raw_calls, list) or not raw_calls:
+        raise ProcessError("provider returned a function call without any calls")
+    if len(raw_calls) > request.max_tool_calls():
+        raise ProcessError("provider returned more function calls than allowed")
+    return [_parse_tool_call(raw_call, active_tools) for raw_call in raw_calls]
+
+
+def _parse_tool_call(raw_call: object, active_tools: list[FunctionTool]) -> ToolCall:
+    """Validate one ``{"name", "arguments"}`` entry against the tool it names."""
+
+    if not isinstance(raw_call, dict):
+        raise ProcessError("provider returned an unknown or invalid function call")
+    name = raw_call.get("name")
+    arguments = raw_call.get("arguments")
     tool = next(
         (tool for tool in active_tools if tool.function.name == name), None
     )
@@ -206,15 +246,10 @@ def parse_structured_result(
         raise ProcessError(
             "provider returned arguments that do not match the tool's schema"
         ) from exc
-
-    result.text = None
-    result.tool_calls = [
-        ToolCall(
-            id=f"call_local_{uuid.uuid4().hex}",
-            function=FunctionCall(
-                name=name,
-                arguments=json.dumps(arguments, separators=(",", ":")),
-            ),
-        )
-    ]
-    return result
+    return ToolCall(
+        id=f"call_local_{uuid.uuid4().hex}",
+        function=FunctionCall(
+            name=name,
+            arguments=json.dumps(arguments, separators=(",", ":")),
+        ),
+    )

@@ -320,7 +320,7 @@ async def test_warm_claude_is_rejected_to_preserve_statelessness() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("n", 2), ("parallel_tool_calls", True)],
+    [("n", 2)],
 )
 async def test_unsupported_openai_controls_return_clear_400(
     field: str, value: object

@@ -4,7 +4,11 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from kessel_gateway.models import ChatCompletionRequest, ProviderResult
+from kessel_gateway.models import (
+    MAX_PARALLEL_TOOL_CALLS,
+    ChatCompletionRequest,
+    ProviderResult,
+)
 from kessel_gateway.runner import ProcessError
 from kessel_gateway.structured import output_schema, parse_structured_result
 
@@ -36,19 +40,24 @@ TIME_TOOL = {
 }
 
 
-def tool_request(tool_choice="required", tools=(WEATHER_TOOL,)) -> ChatCompletionRequest:
+def tool_request(
+    tool_choice="required", tools=(WEATHER_TOOL,), parallel=False
+) -> ChatCompletionRequest:
     return ChatCompletionRequest(
         model="default",
         messages=[{"role": "user", "content": "Weather in Seattle"}],
         tools=list(tools),
         tool_choice=tool_choice,
+        parallel_tool_calls=parallel,
     )
 
 
-def envelope(kind: str, name=None, arguments=None, content=None) -> str:
-    return json.dumps(
-        {"kind": kind, "name": name, "arguments": arguments, "content": content}
-    )
+def envelope(kind: str, name=None, arguments=None, content=None, calls=None) -> str:
+    """Build a provider reply; pass ``name``/``arguments`` for one call or ``calls`` for many."""
+
+    if calls is None:
+        calls = [] if name is None else [{"name": name, "arguments": arguments}]
+    return json.dumps({"kind": kind, "calls": calls, "content": content})
 
 
 def test_required_tool_choice_schema_and_call() -> None:
@@ -56,7 +65,10 @@ def test_required_tool_choice_schema_and_call() -> None:
     schema = output_schema(request)
     assert schema is not None
     assert schema["properties"]["kind"]["enum"] == ["function_call"]
-    assert schema["properties"]["name"]["enum"] == ["get_weather", None]
+    call_schemas = schema["properties"]["calls"]["items"]["anyOf"]
+    assert [call["properties"]["name"]["enum"] for call in call_schemas] == [
+        ["get_weather"]
+    ]
     assert schema["additionalProperties"] is False
 
     result = parse_structured_result(
@@ -109,7 +121,10 @@ def test_named_tool_choice_narrows_active_tools_to_one() -> None:
     )
     schema = output_schema(request)
     assert schema["properties"]["kind"]["enum"] == ["function_call"]
-    assert schema["properties"]["name"]["enum"] == ["get_time", None]
+    call_schemas = schema["properties"]["calls"]["items"]["anyOf"]
+    assert [call["properties"]["name"]["enum"] for call in call_schemas] == [
+        ["get_time"]
+    ]
 
     result = parse_structured_result(
         request,
@@ -145,7 +160,7 @@ def test_multiple_tools_can_choose_the_second_tool() -> None:
 def test_arguments_invalid_for_the_chosen_tool_are_rejected() -> None:
     request = tool_request(tool_choice="required", tools=(WEATHER_TOOL, TIME_TOOL))
 
-    with pytest.raises(ProcessError, match="do not match the tool's schema"):
+    with pytest.raises(ProcessError, match="does not match the schema"):
         parse_structured_result(
             request,
             ProviderResult(
@@ -235,7 +250,78 @@ def test_structured_result_must_match_the_envelope_schema() -> None:
     with pytest.raises(ProcessError, match="does not match"):
         parse_structured_result(
             tool_request(),
-            ProviderResult(text='{"kind":"function_call","name":42}', model="default"),
+            ProviderResult(text='{"kind":"function_call","calls":42}', model="default"),
+        )
+
+
+def test_single_call_schema_caps_calls_at_one_by_default() -> None:
+    schema = output_schema(tool_request())
+
+    assert schema["properties"]["calls"]["maxItems"] == 1
+
+
+def test_parallel_schema_allows_up_to_the_parallel_limit() -> None:
+    schema = output_schema(tool_request(parallel=True))
+
+    assert schema["properties"]["calls"]["maxItems"] == MAX_PARALLEL_TOOL_CALLS
+
+
+def test_parallel_request_returns_every_call_with_unique_ids() -> None:
+    request = tool_request(tools=(WEATHER_TOOL, TIME_TOOL), parallel=True)
+    reply = envelope(
+        "function_call",
+        calls=[
+            {"name": "get_weather", "arguments": {"city": "Seattle"}},
+            {"name": "get_time", "arguments": {"zone": "UTC"}},
+            {"name": "get_weather", "arguments": {"city": "Austin"}},
+        ],
+    )
+
+    result = parse_structured_result(request, ProviderResult(text=reply, model="default"))
+
+    assert [call.function.name for call in result.tool_calls] == [
+        "get_weather",
+        "get_time",
+        "get_weather",
+    ]
+    assert json.loads(result.tool_calls[2].function.arguments) == {"city": "Austin"}
+    assert len({call.id for call in result.tool_calls}) == 3
+
+
+def test_multiple_calls_are_rejected_when_parallel_is_off() -> None:
+    reply = envelope(
+        "function_call",
+        calls=[
+            {"name": "get_weather", "arguments": {"city": "Seattle"}},
+            {"name": "get_weather", "arguments": {"city": "Austin"}},
+        ],
+    )
+
+    with pytest.raises(ProcessError, match="does not match"):
+        parse_structured_result(
+            tool_request(), ProviderResult(text=reply, model="default")
+        )
+
+
+def test_parallel_request_rejects_a_call_with_invalid_arguments() -> None:
+    request = tool_request(tools=(WEATHER_TOOL, TIME_TOOL), parallel=True)
+    reply = envelope(
+        "function_call",
+        calls=[
+            {"name": "get_weather", "arguments": {"city": "Seattle"}},
+            {"name": "get_time", "arguments": {"city": "Seattle"}},
+        ],
+    )
+
+    with pytest.raises(ProcessError):
+        parse_structured_result(request, ProviderResult(text=reply, model="default"))
+
+
+def test_function_call_without_any_calls_is_rejected() -> None:
+    with pytest.raises(ProcessError, match="without any calls"):
+        parse_structured_result(
+            tool_request(),
+            ProviderResult(text=envelope("function_call"), model="default"),
         )
 
 

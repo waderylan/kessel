@@ -220,7 +220,7 @@ async function readOpenAIStream(response, provider, startedAt) {
   let buffer = "";
   let output = "";
   let usage = null;
-  let toolCall = null;
+  const toolCalls = [];
   showState("response");
   responseMeta.textContent = `${provider} streaming`;
 
@@ -242,15 +242,15 @@ async function readOpenAIStream(response, provider, startedAt) {
         output += delta.content;
         responseText.textContent = output;
       }
-      if (delta?.tool_calls?.[0]) {
-        toolCall = delta.tool_calls[0];
-        responseText.textContent = JSON.stringify(toolCall, null, 2);
+      if (delta?.tool_calls?.length) {
+        for (const call of delta.tool_calls) toolCalls[call.index] = call;
+        responseText.textContent = JSON.stringify(toolCalls, null, 2);
       }
     }
     if (done) break;
   }
 
-  if (!output && !toolCall) responseText.textContent = "Provider returned no output.";
+  if (!output && !toolCalls.length) responseText.textContent = "Provider returned no output.";
   const elapsedSeconds = (performance.now() - startedAt) / 1000;
   responseMeta.textContent = formatUsage(usage, provider, elapsedSeconds);
 }

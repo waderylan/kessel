@@ -52,15 +52,28 @@ def build_prompt(request: ChatCompletionRequest) -> str:
             + "\n"
             + json.dumps(tool_payload, separators=(",", ":"))
         )
-        choice_instruction = (
-            "You must call one of the supplied functions."
-            if request.requires_tool_call()
-            else "Either call one function or reply with a message, "
-            "following the output schema."
-        )
+        if request.parallel_tool_calls:
+            choice_instruction = (
+                "You must call at least one of the supplied functions."
+                if request.requires_tool_call()
+                else "Either call functions or reply with a message, "
+                "following the output schema."
+            )
+            count_instruction = (
+                "List every independent function call in the reply's calls "
+                f"array, up to {request.max_tool_calls()}."
+            )
+        else:
+            choice_instruction = (
+                "You must call one of the supplied functions."
+                if request.requires_tool_call()
+                else "Either call one function or reply with a message, "
+                "following the output schema."
+            )
+            count_instruction = "Produce at most one function call."
         sections.append(
             marker("TOOL_INSTRUCTIONS")
-            + f"\n{choice_instruction} Produce at most one function call."
+            + f"\n{choice_instruction} {count_instruction}"
         )
     schema = output_schema(request)
     if schema is not None:

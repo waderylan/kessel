@@ -12,6 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 PositiveStrictInt = Annotated[int, Field(strict=True, gt=0)]
 
+# Upper bound on function calls in one response when parallel calls are allowed.
+MAX_PARALLEL_TOOL_CALLS = 16
+
 
 def _validate_schema(schema: dict[str, Any]) -> dict[str, Any]:
     stack: list[tuple[object, int]] = [(schema, 0)]
@@ -204,11 +207,16 @@ class ChatCompletionRequest(BaseModel):
         return list(self.tools)
 
     def requires_tool_call(self) -> bool:
-        """True when the response must contain exactly one function call."""
+        """True when the response must contain at least one function call."""
 
         return self.tool_choice == "required" or isinstance(
             self.tool_choice, NamedToolChoice
         )
+
+    def max_tool_calls(self) -> int:
+        """How many function calls one response may contain."""
+
+        return MAX_PARALLEL_TOOL_CALLS if self.parallel_tool_calls else 1
 
 
 class CompletionMessage(BaseModel):
@@ -352,6 +360,11 @@ class AnthropicTool(BaseModel):
 class AnthropicToolChoice(BaseModel):
     type: Literal["auto", "any", "tool", "none"] = "auto"
     name: str | None = None
+    # Kessel returns a single tool call unless the client sends False explicitly.
+    disable_parallel_tool_use: bool | None = None
+
+    def allows_parallel_tool_use(self) -> bool:
+        return self.disable_parallel_tool_use is False
 
 
 class AnthropicMessagesRequest(BaseModel):
@@ -440,6 +453,10 @@ class AnthropicMessagesRequest(BaseModel):
             stream_options=StreamOptions(include_usage=True),
             tools=function_tools,
             tool_choice=choice,
+            parallel_tool_calls=(
+                self.tool_choice is not None
+                and self.tool_choice.allows_parallel_tool_use()
+            ),
             reasoning_effort=self.reasoning_effort,
             backend=self.backend,
             max_tokens=self.max_tokens,

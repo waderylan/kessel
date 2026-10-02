@@ -836,11 +836,6 @@ def create_app(
         )
 
     def validate_chat_surface(body: ChatCompletionRequest) -> None:
-        if body.parallel_tool_calls:
-            unsupported_parameter(
-                "parallel_tool_calls",
-                "parallel function calls are not supported",
-            )
         stop_sequences = chat_stop_sequences(body)
         structured_response = (
             body.response_format is not None
@@ -1042,15 +1037,14 @@ def create_app(
                             continue
                         result = event.result
                         if result.tool_calls:
-                            tool = result.tool_calls[0]
                             yield encode(
                                 chunk(
                                     {
                                         "tool_calls": [
-                                            {
-                                                "index": 0,
-                                                **tool.model_dump(),
-                                            }
+                                            {"index": index, **tool.model_dump()}
+                                            for index, tool in enumerate(
+                                                result.tool_calls
+                                            )
                                         ]
                                     }
                                 )
@@ -1244,13 +1238,21 @@ def create_app(
                         stop_reason = "end_turn"
                         stop_sequence = None
                         if result.tool_calls:
-                            tool = result.tool_calls[0]
-                            block_started = True
-                            yield encode(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": 0,
+                            # One content block per tool call, after any text block.
+                            first_tool_index = 1 if block_started else 0
+                            if block_started:
+                                yield encode(
+                                    "content_block_stop",
+                                    {"type": "content_block_stop", "index": 0},
+                                )
+                            block_started = False
+                            for offset, tool in enumerate(result.tool_calls):
+                                index = first_tool_index + offset
+                                yield encode(
+                                    "content_block_start",
+                                    {
+                                        "type": "content_block_start",
+                                        "index": index,
                                         "content_block": {
                                             "type": "tool_use",
                                             "id": tool.id,
@@ -1259,17 +1261,21 @@ def create_app(
                                         },
                                     },
                                 )
-                            yield encode(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": 0,
-                                    "delta": {
-                                        "type": "input_json_delta",
-                                        "partial_json": tool.function.arguments,
+                                yield encode(
+                                    "content_block_delta",
+                                    {
+                                        "type": "content_block_delta",
+                                        "index": index,
+                                        "delta": {
+                                            "type": "input_json_delta",
+                                            "partial_json": tool.function.arguments,
+                                        },
                                     },
-                                },
-                            )
+                                )
+                                yield encode(
+                                    "content_block_stop",
+                                    {"type": "content_block_stop", "index": index},
+                                )
                         if result.finish_reason == "length":
                             stop_reason = "max_tokens"
                         elif result.finish_reason == "stop":
@@ -1362,7 +1368,6 @@ def create_app(
         )
         usage = result.usage
         if result.tool_calls:
-            tool = result.tool_calls[0]
             content = [
                 {
                     "type": "tool_use",
@@ -1370,6 +1375,7 @@ def create_app(
                     "name": tool.function.name,
                     "input": json.loads(tool.function.arguments),
                 }
+                for tool in result.tool_calls
             ]
             stop_reason = (
                 "max_tokens"
