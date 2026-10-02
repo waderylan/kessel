@@ -7,3 +7,4 @@ build/
 dist/
 *.egg-info/
 testing-sandbox/
+RELEASE_CHECKLIST.md
