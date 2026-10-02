@@ -147,7 +147,13 @@ class ChatCompletionRequest(BaseModel):
     stream_options: StreamOptions | None = None
     tools: list[FunctionTool] = Field(default_factory=list, max_length=16)
     tool_choice: Literal["none", "auto", "required"] | NamedToolChoice = "auto"
-    parallel_tool_calls: bool = False
+    parallel_tool_calls: bool = Field(
+        default=False,
+        description=(
+            "When true, one response may contain up to "
+            f"{MAX_PARALLEL_TOOL_CALLS} tool calls. When false, at most one."
+        ),
+    )
     response_format: ResponseFormat | None = None
     stream: bool = False
     stop: str | list[str] | None = None
@@ -360,8 +366,13 @@ class AnthropicTool(BaseModel):
 class AnthropicToolChoice(BaseModel):
     type: Literal["auto", "any", "tool", "none"] = "auto"
     name: str | None = None
-    # Kessel returns a single tool call unless the client sends False explicitly.
-    disable_parallel_tool_use: bool | None = None
+    disable_parallel_tool_use: bool | None = Field(
+        default=None,
+        description=(
+            "False allows several tool_use blocks in one response. "
+            "True or omitted returns at most one."
+        ),
+    )
 
     def allows_parallel_tool_use(self) -> bool:
         return self.disable_parallel_tool_use is False
