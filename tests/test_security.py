@@ -472,6 +472,23 @@ async def test_oversized_ndjson_line_has_bounded_error(tmp_path: Path) -> None:
         await anext(stream)
 
 
+@pytest.mark.asyncio
+async def test_line_over_the_cap_but_under_the_stream_limit_is_rejected(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "over_cap.py"
+    script.write_text(
+        "import sys\nsys.stdout.write('x' * 150_000 + '\\n')\nsys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    runner = ProcessRunner(
+        timeout_seconds=5, max_output_bytes=100_000, max_line_bytes=100_000
+    )
+    stream = runner.stream_lines([sys.executable, str(script)], "", tmp_path)
+    with pytest.raises(ProcessOutputLimitError, match="oversized output line"):
+        await anext(stream)
+
+
 def test_config_is_restrictive_and_atomic(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("KESSEL_CONFIG_DIR", str(tmp_path / "config"))
     config = UserConfig(api_key="secret")

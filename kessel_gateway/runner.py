@@ -67,6 +67,14 @@ class ProviderInvalidModelError(ProcessError):
     public_message = "Unknown or unsupported model"
 
 
+# asyncio reads a pipe in chunks of up to 256 KiB and pauses the pipe once its
+# buffer exceeds twice the stream limit. A paused pipe never reports end of
+# file, so on Python 3.11 `process.wait()` blocks forever after the process is
+# killed. Keeping the stream limit at one chunk or more means the buffer can
+# never reach that threshold; the real per-line cap is enforced separately.
+_MIN_STREAM_LIMIT_BYTES = 262_144
+
+
 def check_reply_size(reply_bytes: int, limit: int | None) -> None:
     """Raise when the reply's running UTF-8 size exceeds the output limit."""
 
@@ -272,10 +280,14 @@ class ProcessRunner:
                         raise ProcessOutputLimitError(
                             "provider emitted an oversized output line"
                         ) from exc
+                    if len(line) > self.max_line_bytes:
+                        raise ProcessOutputLimitError(
+                            "provider emitted an oversized output line"
+                        )
                     if not line:
                         break
                     # Lines are yielded, not retained, and each one is capped by
-                    # the stream limit. Providers cap the reply text itself,
+                    # max_line_bytes. Providers cap the reply text itself,
                     # since event framing and partial deltas can be many
                     # times larger than the text they carry.
                     yield line.decode(
@@ -341,7 +353,7 @@ class ProcessRunner:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                limit=self.max_line_bytes,
+                limit=max(self.max_line_bytes, _MIN_STREAM_LIMIT_BYTES),
                 **provider_process_options(),
             )
         except FileNotFoundError as exc:
