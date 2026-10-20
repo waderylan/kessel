@@ -10,6 +10,62 @@ Kessel is intended for local development. It does not expose your subscription t
 
 ## Install and configure
 
+### Set up with your coding agent
+
+Kessel includes three agent skills with distinct scopes:
+
+| Skill | Use it for | Example request |
+| --- | --- | --- |
+| `kessel-setup` | Install prerequisites, guide provider login, and verify Kessel | "Set up Kessel on this machine." |
+| `kessel-connect` | Connect a project or editor, adapt API code, or create a starter | "Connect this project to Kessel and test it." |
+| `kessel-doctor` | Diagnose failures, repair connections and services, or perform requested upgrades | "Find out why Kessel stopped working and fix it." |
+
+After installing the package with `pipx install kessel-gateway`, run one of
+these commands **from the project where you use your agent**:
+
+```text
+# Codex
+kessel skills install --directory .agents/skills
+
+# Claude Code
+kessel skills install --directory .claude/skills
+```
+
+Each command copies all three skills and their references from the installed
+release. The destination is explicit; no global agent configuration is changed.
+For user-wide installation, supply an absolute path to your agent's user skill
+directory instead. See the [Codex skill documentation](https://developers.openai.com/codex/skills/)
+or [Claude Code skill documentation](https://code.claude.com/docs/en/skills)
+for discovery locations.
+
+Start a new agent conversation if the skills are not listed. In Codex, invoke
+`$kessel-setup`, `$kessel-connect`, or `$kessel-doctor`; in Claude Code, use
+`/kessel-setup`, `/kessel-connect`, or `/kessel-doctor`. You can also describe the
+task in natural language and let your agent select the matching skill.
+
+Installing skills only copies readable instructions; it does not run setup,
+install providers, register a service, or grant new tool permissions. Each skill
+instructs the agent to explain its selected actions and affected files before
+changes, stay within your request, and finish with verification results and undo
+steps. Provider login remains an interaction you complete yourself. A check-only
+request to `kessel-doctor` does not authorize repairs.
+
+Run `kessel skills` to list the skills and locate the bundled files for review.
+The source files are in [`kessel_gateway/skills`](kessel_gateway/skills). You can
+also copy the three folders manually into an agent's skill directory, including
+before package installation when working from a source checkout. The skills
+belong in the coding agent helping you set up Kessel; provider requests made
+through the gateway continue to run with skills disabled.
+
+Repeated installation preserves identical copies and refuses differing or
+customized copies before copying any skill. After a Kessel upgrade, review and
+back up existing skill folders, move differing copies aside, and run the same
+install command to obtain the release's instructions. To remove these skills,
+delete only the three installed `kessel-*` folders; Kessel configuration and
+provider logins are separate.
+
+The manual setup steps follow.
+
 ### 1. Install and log in to at least one provider
 
 | Provider | Install | Log in |
@@ -201,6 +257,8 @@ Both commands accept `--provider {codex,claude}` to choose which provider the Op
 | Command | Action |
 | --- | --- |
 | `kessel --version` | Show the installed Kessel version |
+| `kessel skills` | List bundled agent skills and their source directory |
+| `kessel skills install --directory PATH` | Copy all three skills into an explicit agent skill directory; refuse differing existing copies |
 | `kessel setup` | Configure Kessel and test available providers without leaving it running |
 | `kessel setup --port PORT` | Configure Kessel and save `PORT` (1-65535) as the port it listens on |
 | `kessel accounts` | Show account information for installed provider CLIs |

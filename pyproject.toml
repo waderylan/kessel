@@ -74,7 +74,13 @@ timeout_method = "thread"
 include = ["kessel_gateway*"]
 
 [tool.setuptools.package-data]
-kessel_gateway = ["static/*", "providers/*.txt"]
+kessel_gateway = [
+    "static/*",
+    "providers/*.txt",
+    "skills/*/SKILL.md",
+    "skills/*/agents/*.yaml",
+    "skills/*/references/*.md",
+]
 
 [tool.setuptools.dynamic]
 version = { attr = "kessel_gateway.__version__" }

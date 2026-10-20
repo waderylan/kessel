@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kessel Setup"
+  short_description: "Install Kessel and verify your local provider"
+  default_prompt: "Use $kessel-setup to set up Kessel on this machine, explain the changes, and verify a local request."

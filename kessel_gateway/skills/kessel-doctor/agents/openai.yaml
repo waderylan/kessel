@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kessel Doctor"
+  short_description: "Diagnose failures and verify a scoped repair"
+  default_prompt: "Use $kessel-doctor to diagnose this Kessel failure, explain the repair, and verify the original operation."

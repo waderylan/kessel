@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kessel Connect"
+  short_description: "Connect a project or editor and verify a request"
+  default_prompt: "Use $kessel-connect to connect this project to Kessel, show which files change, and test the connection."

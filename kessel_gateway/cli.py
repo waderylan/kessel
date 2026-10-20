@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from kessel_gateway import __version__
+from kessel_gateway.agent_skills import command_skills
 from kessel_gateway.models import ProviderAccountInfo
 from kessel_gateway.process_security import ProcessGroupGuard
 from kessel_gateway.providers.accounts import read_provider_accounts
@@ -875,6 +876,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    skills_parser = subparsers.add_parser("skills", help="list bundled agent skills")
+    skills_commands = skills_parser.add_subparsers(dest="skills_command")
+    skills_install = skills_commands.add_parser(
+        "install", help="copy all three skills into an agent skill directory"
+    )
+    skills_install.add_argument(
+        "--directory",
+        type=Path,
+        required=True,
+        help="parent skill directory, for example .agents/skills or .claude/skills",
+    )
     setup_parser = subparsers.add_parser(
         "setup", help="check providers and configure Kessel"
     )
@@ -942,6 +954,8 @@ def _degraded_detail(payload: dict) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "skills":
+            return command_skills(getattr(args, "directory", None))
         if args.command == "setup":
             return command_setup(args.port)
         if args.command == "accounts":
