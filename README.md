@@ -12,16 +12,29 @@ Kessel is intended for local development. It does not expose your subscription t
 
 ### Set up with your coding agent
 
-Kessel includes three agent skills with distinct scopes:
+Start with **`kessel-setup`**, then use **`kessel-connect`** for your application
+or editor. Use **`kessel-doctor`** when something fails or you want a health
+check. Each skill includes the Kessel-specific instructions your agent needs;
+you do not need to paste this README into the conversation.
 
 | Skill | Use it for | Example request |
 | --- | --- | --- |
-| `kessel-setup` | Install prerequisites, guide provider login, and verify Kessel | "Set up Kessel on this machine." |
-| `kessel-connect` | Connect a project or editor, adapt API code, or create a starter | "Connect this project to Kessel and test it." |
-| `kessel-doctor` | Diagnose failures, repair connections and services, or perform requested upgrades | "Find out why Kessel stopped working and fix it." |
+| [`kessel-setup`](kessel_gateway/skills/kessel-setup/SKILL.md) | Install prerequisites, guide provider login, and verify Kessel | "Set up Kessel on this machine." |
+| [`kessel-connect`](kessel_gateway/skills/kessel-connect/SKILL.md) | Connect a project or editor, adapt API code, or create a starter | "Connect this project to Kessel and test it." |
+| [`kessel-doctor`](kessel_gateway/skills/kessel-doctor/SKILL.md) | Diagnose failures, repair connections and services, or perform requested upgrades | "Find out why Kessel stopped working and fix it." |
 
-After installing the package with `pipx install kessel-gateway`, run one of
-these commands **from the project where you use your agent**:
+#### 1. Install the package and skills
+
+With Python 3.10+ and [pipx](https://pipx.pypa.io/) available, run this in your
+terminal:
+
+```text
+pipx install kessel-gateway
+```
+
+Then run the command for your agent **from your application's project
+directory**. You can install the skills before provider login or `kessel setup`;
+the gateway does not need to be running.
 
 ```text
 # Codex
@@ -32,16 +45,53 @@ kessel skills install --directory .claude/skills
 ```
 
 Each command copies all three skills and their references from the installed
-release. The destination is explicit; no global agent configuration is changed.
-For user-wide installation, supply an absolute path to your agent's user skill
-directory instead. See the [Codex skill documentation](https://developers.openai.com/codex/skills/)
-or [Claude Code skill documentation](https://code.claude.com/docs/en/skills)
-for discovery locations.
+release into that project. To use them across your projects, choose the matching
+user directory instead: `--directory "~/.agents/skills"` for Codex or
+`--directory "~/.claude/skills"` for Claude Code.
 
-Start a new agent conversation if the skills are not listed. In Codex, invoke
-`$kessel-setup`, `$kessel-connect`, or `$kessel-doctor`; in Claude Code, use
-`/kessel-setup`, `/kessel-connect`, or `/kessel-doctor`. You can also describe the
-task in natural language and let your agent select the matching skill.
+If Python or pipx is not installed yet, ask your existing coding agent to help
+install those prerequisites.
+From a source checkout, you can also copy the three folders under
+[`kessel_gateway/skills`](kessel_gateway/skills) into the agent's skill directory
+before installing Kessel.
+
+#### 2. Ask your agent to set up Kessel
+
+In your **agent conversation**, send the prompt for your agent:
+
+```text
+# Codex chat
+$kessel-setup Set up Kessel on this machine and verify a local request.
+
+# Claude Code chat
+/kessel-setup Set up Kessel on this machine and verify a local request.
+```
+
+Start a new conversation if the skills are not listed. Setup guides you through
+the selected provider's login and tests a real request. One working provider is
+enough. Setup stops its temporary server when testing finishes.
+
+#### 3. Connect a client or troubleshoot
+
+Use `$kessel-connect` in Codex or `/kessel-connect` in Claude Code, followed by
+your connection request. For checks or repairs, use `$kessel-doctor` or
+`/kessel-doctor` instead. Example requests:
+
+| Goal | Request |
+| --- | --- |
+| Existing application | "Connect this project to Kessel using Codex and verify a request." |
+| New example | "Create a minimal Python example using Kessel and Claude Code, with the exact launch command." |
+| Editor | "Connect Continue to Kessel and explain whether it needs a background service." |
+| Diagnose only | "Use kessel-doctor to check my setup without changing anything." |
+| Repair | "Use kessel-doctor to fix this connection error and repeat the failed request." |
+
+You can also describe the task in natural language and let your agent select the
+matching skill. After connection, the agent reports the changed files, selected
+provider, launch command or editor settings, what remains running, and the actual
+test result. A client-side step that needs your interaction stays pending until
+you complete it.
+
+#### What the skills change
 
 Installing skills only copies readable instructions; it does not run setup,
 install providers, register a service, or grant new tool permissions. Each skill
@@ -51,11 +101,13 @@ steps. Provider login remains an interaction you complete yourself. A check-only
 request to `kessel-doctor` does not authorize repairs.
 
 Run `kessel skills` to list the skills and locate the bundled files for review.
-The source files are in [`kessel_gateway/skills`](kessel_gateway/skills). You can
-also copy the three folders manually into an agent's skill directory, including
-before package installation when working from a source checkout. The skills
-belong in the coding agent helping you set up Kessel; provider requests made
-through the gateway continue to run with skills disabled.
+The skills belong in the coding agent helping you set up Kessel; provider
+requests made through the gateway continue to run with skills disabled. See
+the [Codex skill documentation](https://developers.openai.com/codex/skills/)
+or [Claude Code skill documentation](https://code.claude.com/docs/en/skills)
+for agent-specific discovery behavior.
+
+#### Update or remove the skills
 
 Repeated installation preserves identical copies and refuses differing or
 customized copies before copying any skill. After a Kessel upgrade, review and
