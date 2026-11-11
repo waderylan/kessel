@@ -1136,10 +1136,13 @@ def create_app(
         body: AnthropicMessagesRequest,
         raw_request: Request,
     ) -> Response:
-        if body.stop_sequences and body.tools:
+        structured_output = (
+            body.output_config is not None and body.output_config.format is not None
+        )
+        if body.stop_sequences and (body.tools or structured_output):
             unsupported_parameter(
                 "stop_sequences",
-                "stop sequences are not supported with tools",
+                "stop sequences are not supported with tools or structured output",
             )
         headers = await preflight_headers("claude")
         if body.backend == "warm":

@@ -378,6 +378,27 @@ class AnthropicToolChoice(BaseModel):
         return self.disable_parallel_tool_use is False
 
 
+class AnthropicOutputFormat(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    type: Literal["json_schema"]
+    schema_: dict[str, Any] = Field(alias="schema")
+
+    @field_validator("schema_")
+    @classmethod
+    def validate_schema(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _validate_schema(value)
+
+
+class AnthropicOutputConfig(BaseModel):
+    """Supported ``output_config`` keys; any other key is ignored."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    format: AnthropicOutputFormat | None = None
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+
+
 class AnthropicMessagesRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -389,6 +410,7 @@ class AnthropicMessagesRequest(BaseModel):
     tools: list[AnthropicTool] = Field(default_factory=list, max_length=16)
     tool_choice: AnthropicToolChoice | None = None
     reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "low"
+    output_config: AnthropicOutputConfig | None = None
     backend: Literal["fresh", "warm"] = "fresh"
     stop_sequences: list[str] = Field(default_factory=list, max_length=4)
 
@@ -457,6 +479,23 @@ class AnthropicMessagesRequest(BaseModel):
             choice = "none"
         else:
             choice = "auto"
+        effort = self.reasoning_effort
+        response_format = None
+        if self.output_config is not None:
+            if self.output_config.effort is not None:
+                # Kessel has no "max"; clamp it to its highest level.
+                effort = (
+                    "xhigh"
+                    if self.output_config.effort == "max"
+                    else self.output_config.effort
+                )
+            if self.output_config.format is not None:
+                response_format = ResponseFormat(
+                    type="json_schema",
+                    json_schema=JsonSchemaDefinition(
+                        name="output", schema=self.output_config.format.schema_
+                    ),
+                )
         return ChatCompletionRequest(
             model=self.model,
             messages=messages,
@@ -468,7 +507,8 @@ class AnthropicMessagesRequest(BaseModel):
                 self.tool_choice is not None
                 and self.tool_choice.allows_parallel_tool_use()
             ),
-            reasoning_effort=self.reasoning_effort,
+            response_format=response_format,
+            reasoning_effort=effort,
             backend=self.backend,
             max_tokens=self.max_tokens,
             stop=self.stop_sequences or None,

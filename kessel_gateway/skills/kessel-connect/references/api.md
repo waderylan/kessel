@@ -27,6 +27,9 @@ model names. A client model selector must use an available ID.
   path additionally requires `additionalProperties: false` and every property
   listed in `required` at every object level. Do not silently remove constraints
   to get a successful response.
+- Anthropic Messages accepts `output_config.format` (`json_schema`, same
+  enforcement as above) and `output_config.effort`, so
+  `client.messages.parse(..., output_format=Model)` works.
 - Up to 16 function tools. The application executes requested tools and sends
   each result in the next request. Kessel's provider processes do not execute
   the application's tools or gain its filesystem access.

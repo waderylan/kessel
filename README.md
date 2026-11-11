@@ -391,6 +391,10 @@ Provider status is `authenticated`, `not_authenticated`, `not_installed`, or
   - Anthropic Messages: `tool_choice.disable_parallel_tool_use: false` returns one `tool_use` content block per call. Omitting the field or sending `true` returns a single block.
   - Every call receives its own `id`, and its arguments are validated against the schema of the tool it names. The client answers each call with its own `tool` message or `tool_result` block in the next request.
 - The Anthropic Messages route accepts any `claude-*` model ID and rejects requests whose content includes image or document blocks.
+- The Anthropic Messages route supports `output_config`, including the SDK's `client.messages.parse(..., output_format=Model)`:
+  - `output_config.format` (`{"type": "json_schema", "schema": {...}}`) uses the same JSON Schema enforcement as Chat Completions `response_format`. A valid reply is one `text` block containing the raw JSON; a reply that does not match the schema returns an error instead of non-conforming text. Stop sequences cannot be combined with it.
+  - `output_config.effort` (`low`, `medium`, `high`, `xhigh`, `max`) sets the reasoning effort. `max` maps to `xhigh`, and the value overrides the top-level `reasoning_effort`.
+  - Other `output_config` keys and unknown top-level fields are ignored.
 - Codex supports an optional warm backend, but every warm request still receives a new ephemeral thread; the warm Codex process uses the account already signed in to the Codex CLI in place, without copying credentials, and it shuts itself down after 10 minutes of idle time. Warm and streamed Codex requests for the `default` model use the `model` set in your Codex `config.toml`, when one is set.
 - Provider processes inherit `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `NODE_EXTRA_CA_CERTS` from Kessel's environment when those are set, so provider CLIs behind a corporate proxy or custom CA bundle keep working.
 - Kessel must run as one Uvicorn worker because provider limits and warm Codex state are process-local.
